@@ -11,12 +11,17 @@
 --    e ajustar os DROP CONSTRAINT abaixo se necessário.
 BEGIN;
 
+-- ── Views dependentes das PKs/constraints: dropadas aqui, recriadas no fim desta migration
+DROP VIEW IF EXISTS public.v_chats_with_categories CASCADE;
+DROP VIEW IF EXISTS public.v_chats_with_contact CASCADE;
+DROP VIEW IF EXISTS public.v_messages_with_sender CASCADE;
+
 -- ── 0. Backfill das linhas antigas (pré-webhook-carimbo) com a instância default
 DO $$
 DECLARE def_inst TEXT;
 BEGIN
   SELECT instance_id INTO def_inst FROM public.zapi_instance WHERE is_default LIMIT 1;
-  IF def_inst IS NULL THEN RAISE EXCEPTION 'instância default não encontrada'; END IF;
+  IF def_inst IS NULL THEN RAISE NOTICE 'Sem instância default (banco novo) — pulando backfill.'; RETURN; END IF;
   UPDATE public.chats              SET instance_id = def_inst WHERE instance_id IS NULL;
   UPDATE public.messages           SET instance_id = def_inst WHERE instance_id IS NULL;
   UPDATE public.lid_mapping        SET instance_id = def_inst WHERE instance_id IS NULL;
@@ -111,10 +116,7 @@ BEGIN
     IF msg_type IN ('ptt', 'audio')
        AND (msg_content IS NULL OR msg_content = '')
        AND is_private THEN
-      PERFORM net.http_post(
-        url := 'https://<SUPABASE_PROJECT_ID>.supabase.co/functions/v1/transcribe-queue?id=' || NEW.message_id::text,
-        headers := '{"Authorization":"Bearer <SUPABASE_SERVICE_ROLE_KEY>"}'::jsonb
-      );
+      PERFORM public.call_edge_function('/functions/v1/transcribe-queue?id=' || NEW.message_id::text);
     END IF;
   END IF;
   RETURN NEW;

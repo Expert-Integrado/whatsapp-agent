@@ -18,6 +18,7 @@ COMMENT ON COLUMN public.zapi_instance.webhook_token IS
 --    (Tinha sido DEFERIDO na 0028 por medo de rebuild lento; build foi rapido
 --     pois nao havia duplicatas — todas as linhas eram instancia pessoal.)
 ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_provider_msg_id_key;
+ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_instance_provider_unique;
 ALTER TABLE public.messages
   ADD CONSTRAINT messages_instance_provider_unique UNIQUE (instance_id, provider_msg_id);
 

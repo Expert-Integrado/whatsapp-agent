@@ -1,5 +1,12 @@
+[functions.mcp-api]
+verify_jwt = false
+
 [functions.process-webhook]
 verify_jwt = false
+
+# A própria mcp-api é o OAuth 2.1 Authorization Server (auto-approve, confidential
+# client via OAUTH_CLIENT_ID/SECRET + PKCE). Não usa o OAuth server do Supabase Auth
+# (que exigiria uma tela de consent, e o Supabase bloqueia HTML no domínio dele).
 
 [functions.send-message]
 verify_jwt = true

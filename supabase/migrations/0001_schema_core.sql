@@ -2,6 +2,41 @@
 -- EXTENSIONS
 -- ════════════════════════════════════════════════════════════════
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- pg_cron (agendador) + pg_net (HTTP de dentro do Postgres) são pré-requisito
+-- das migrations 0005/0007/0019 (cron.schedule + net.http_post). Habilitadas aqui
+-- pra que um banco novo aplique a 0005 sem o erro "schema cron does not exist".
+CREATE EXTENSION IF NOT EXISTS pg_net;
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+-- ════════════════════════════════════════════════════════════════
+-- HELPER: chamar uma Edge Function de dentro do Postgres (cron/triggers)
+-- ════════════════════════════════════════════════════════════════
+-- Lê a URL base e a service_role do Supabase Vault em runtime — nada de
+-- segredo hardcoded nas migrations. A skill `setup` popula os 2 secrets
+-- (`project_url`, `service_role_key`) via vault.create_secret. Enquanto o
+-- Vault não estiver populado, a função apenas avisa e não dispara (não quebra
+-- o cron nem o trigger).
+CREATE OR REPLACE FUNCTION public.call_edge_function(path TEXT)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  base_url TEXT;
+  srk      TEXT;
+BEGIN
+  SELECT decrypted_secret INTO base_url FROM vault.decrypted_secrets WHERE name = 'project_url';
+  SELECT decrypted_secret INTO srk      FROM vault.decrypted_secrets WHERE name = 'service_role_key';
+  IF base_url IS NULL OR srk IS NULL THEN
+    RAISE NOTICE 'call_edge_function: secrets project_url/service_role_key ausentes no Vault — pulando %', path;
+    RETURN NULL;
+  END IF;
+  RETURN net.http_post(
+    url     := base_url || path,
+    headers := jsonb_build_object('Authorization', 'Bearer ' || srk, 'Content-Type', 'application/json')
+  );
+END;
+$$;
 
 -- ════════════════════════════════════════════════════════════════
 -- TIMESTAMP HELPER

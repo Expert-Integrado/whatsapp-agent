@@ -34,8 +34,59 @@ async function callEdge(name: string, body: unknown): Promise<{ status: number; 
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-mcp-key",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-mcp-key, mcp-protocol-version, mcp-session-id",
+  "Access-Control-Expose-Headers": "WWW-Authenticate",
 };
+
+// ─── OAuth 2.1 (esta edge e o proprio Authorization Server) ───────────────────
+// Auth dupla: (1) x-mcp-key/Bearer == MCP_API_KEY (Claude Code, sem fluxo OAuth);
+// (2) Bearer = access_token JWT emitido por nos (Claude Desktop/Web via Connectors).
+//
+// Single-tenant: a mcp-api e AS + Resource Server. O fluxo Authorization Code roda
+// SEM tela de consent — o /authorize AUTO-APROVA (302 com code), porque o Supabase
+// bloqueia HTML no dominio (nao da pra hospedar consent). A seguranca vem do
+// confidential client: o /token exige client_secret (OAUTH_CLIENT_*), que o dono
+// configura nas "Advanced settings" do connector. code e access_token sao JWT
+// HS256 assinados com a MCP_API_KEY — stateless, sem tabela.
+const RESOURCE_URL = `${SUPABASE_URL}/functions/v1/mcp-api`;
+const PRM_URL = `${RESOURCE_URL}/.well-known/oauth-protected-resource`;
+const OAUTH_CLIENT_ID = Deno.env.get("OAUTH_CLIENT_ID") ?? "";
+const OAUTH_CLIENT_SECRET = Deno.env.get("OAUTH_CLIENT_SECRET") ?? "";
+
+// ─── JWT HS256 (chave = MCP_API_KEY) + PKCE S256, via Web Crypto ──────────────
+const enc = new TextEncoder();
+function b64url(bytes: Uint8Array): string {
+  let s = ""; for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlStr(s: string): string { return b64url(enc.encode(s)); }
+function b64urlToBytes(s: string): Uint8Array {
+  s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
+  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+}
+async function hmacKey(secret: string): Promise<CryptoKey> {
+  return await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+}
+async function jwtSign(payload: Record<string, unknown>, secret: string): Promise<string> {
+  const data = `${b64urlStr(JSON.stringify({ alg: "HS256", typ: "JWT" }))}.${b64urlStr(JSON.stringify(payload))}`;
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(secret), enc.encode(data)));
+  return `${data}.${b64url(sig)}`;
+}
+async function jwtVerify(token: string, secret: string): Promise<Record<string, any> | null> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const ok = await crypto.subtle.verify("HMAC", await hmacKey(secret), b64urlToBytes(parts[2]), enc.encode(`${parts[0]}.${parts[1]}`));
+  if (!ok) return null;
+  try {
+    const p = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[1])));
+    if (p.exp && Date.now() / 1000 > p.exp) return null;
+    return p;
+  } catch { return null; }
+}
+async function sha256b64url(s: string): Promise<string> {
+  return b64url(new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(s))));
+}
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { ...cors, "Content-Type": "application/json" } });
 }
@@ -309,18 +360,46 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
   return { candidates: scored.slice(0, 10).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, last_message_at: c.last_message_at, instance: c.instance_id })) };
 }
 
-// ─── Handler ──────────────────────────────────────────────────────────────────
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: cors });
-  if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
-  if (!MCP_API_KEY) return json({ error: "server_misconfigured: MCP_API_KEY ausente" }, 500);
-  if (!timingSafeEqual(req.headers.get("x-mcp-key") ?? "", MCP_API_KEY)) return json({ error: "unauthorized" }, 401);
+// delay de digitacao humanizado (portado do mcp/index.js — antes era client-side)
+function humanizedTypingSeconds(type: string, content: string): number {
+  const len = (content || "").length;
+  if (type === "text") return Math.min(15, Math.max(1, Math.ceil(len / 30)));
+  if (type === "audio" || type === "ptt") return 3;
+  if (type === "image" || type === "video") return 2;
+  return 1; // document
+}
 
-  let body: any;
-  try { body = await req.json(); } catch { return json({ error: "invalid json" }, 400); }
-  const { action, params = {} } = body;
-  if (typeof action !== "string") return json({ error: "action obrigatorio" }, 400);
+// ─── Voice guide — regras hard universais (portado do mcp/index.js) ───────────
+const HARD_RULES: { id: string; pattern: RegExp; severity: string; message: string }[] = [
+  { id: "tu-pronome", pattern: /\b(tu|teu|tua|teus|tuas|ti)\b/iu, severity: "high", message: "Detectado uso de 'tu/teu/tua' — voice guide proibe em qualquer estrato. o dono usa 'vc'/'seu'." },
+  { id: "em-dash", pattern: /—/, severity: "high", message: "Detectado em-dash (—) — fingerprint de IA. Voice guide manda virgula, dois-pontos, parenteses ou '..'." },
+  { id: "saudacao-generica", pattern: /(?:^|[\s,!?;:.])(ol[áa]|prezad[oa]|cordialmente|atenciosamente|esp[ée]ro que esteja bem)(?=$|[\s,!?;:.])/iu, severity: "high", message: "Detectada saudacao generica/formal. Voice guide manda 'Fala [Nome], beleza?' ou direto no assunto." },
+  { id: "hype", pattern: /(?:^|[\s,!?;:.])(revolucion[áa]ri[oa]|transformador|disruptivo|game[- ]?changer|mindset|f[óo]rmula m[áa]gica)(?=$|[\s,!?;:.])/iu, severity: "high", message: "Detectado vocabulario de hype. Voice guide proibe — user posiciona com contencao." },
+  { id: "urgencia-manufaturada", pattern: /(?:^|[\s,!?;:.])([úu]ltima chance|s[óo] hoje|corre que|aproveita j[áa])(?=$|[\s,!?;:.])/iu, severity: "high", message: "Detectada urgencia manufaturada. Voice guide so aceita escassez REAL." },
+  { id: "softener-equipe", pattern: /\b(quando puder, por favor|se for poss[íi]vel|quando der um tempinho|com todo respeito)\b/iu, severity: "medium", message: "Detectado softener. Em equipe o dono usa ordem direta. Em discordancia, frontalidade direta." },
+  { id: "validacao-afetiva", pattern: /\b(te entendo|imagino como (voc[êe]|vc) (est[áa]|t[áa])|faz sentido (sua|tua) preocupa[çc][ãa]o|fica tranquil[oa] (que|q) vamos)\b/iu, severity: "high", message: "Detectada validacao afetiva. Voice guide regra hard: frontalidade nao inclui validar emocao — devolve pergunta de plano." },
+  { id: "rsrs", pattern: /\brsrs\w*\b/iu, severity: "medium", message: "Detectado 'rsrs'. Voice guide aceita 'kkk' ou 'rs' solto fim-de-frase, mas nao 'rsrs'." },
+];
+function checkVoiceViolations(content: string) {
+  if (!content || typeof content !== "string") return [];
+  const out: any[] = [];
+  for (const rule of HARD_RULES) {
+    const m = content.match(rule.pattern);
+    if (m) out.push({ id: rule.id, severity: rule.severity, message: rule.message, match: m[0] });
+  }
+  return out;
+}
+async function loadVoiceGuide(instanceId?: string | null): Promise<any | null> {
+  if (instanceId) {
+    const { data } = await supabase.from("voice_guide").select("content,instance_id,updated_at").eq("instance_id", instanceId).maybeSingle();
+    if (data) return data;
+  }
+  const { data } = await supabase.from("voice_guide").select("content,instance_id,updated_at").is("instance_id", null).maybeSingle();
+  return data ?? null;
+}
 
+// ─── Executor de actions (reusado pelo legado {action,params} e pelo MCP tools/call) ───
+async function dispatchAction(action: string, params: any = {}): Promise<Response> {
   try {
     switch (action) {
       case "ping": return json({ ok: true, pong: true });
@@ -403,7 +482,7 @@ Deno.serve(async (req) => {
       }
 
       case "inbox": {
-        const { limit = 15, since, waiting_on: waitingFilter, exclude_groups = false, category_slugs, exclude_categories, instance } = params;
+        const { limit = 15, since, waiting_on: waitingFilter, exclude_groups = false, category_slugs, exclude_categories, min_idle_days, instance } = params;
         const instKey = instance ? await resolveInstanceKey(instance) : null;
         const instEq = (q: any) => (instKey ? q.eq("instance_id", instKey) : q);
         const ck = (m: any) => `${m.instance_id}|${m.chat_id}`;
@@ -423,16 +502,26 @@ Deno.serve(async (req) => {
         if (category_slugs?.length) q = q.overlaps("category_slugs", category_slugs);
         const { data: rawChats, error } = await q;
         if (error) return json({ error: error.message }, 500);
-        let chats = (rawChats || []).filter((c: any) => {
-          if (waitingFilter) {
-            const recv = c.last_received_at ? new Date(c.last_received_at).getTime() : 0;
-            const sent = c.last_sent_at ? new Date(c.last_sent_at).getTime() : 0;
-            const w = recv > sent ? "me" : (sent > recv ? "lead" : "none");
-            if (w !== waitingFilter) return false;
-          }
-          if (exclude_categories?.length && c.category_slugs && c.category_slugs.some((s: string) => exclude_categories.includes(s))) return false;
+        // Anota waiting_on + idle_days (dias parado desde a ultima msg relevante),
+        // filtra e — quando min_idle_days ou waiting_on:me — ordena por mais parado
+        // primeiro. Isso absorve a antiga skill 'estou-devendo' direto na tool.
+        const nowMs = Date.now();
+        const annotated = (rawChats || []).map((c: any) => {
+          const recv = c.last_received_at ? new Date(c.last_received_at).getTime() : 0;
+          const sent = c.last_sent_at ? new Date(c.last_sent_at).getTime() : 0;
+          const w = recv > sent ? "me" : (sent > recv ? "lead" : "none");
+          const refTs = w === "me" ? recv : (w === "lead" ? sent : Math.max(recv, sent));
+          return { c, w, idle_days: refTs ? Math.floor((nowMs - refTs) / 86400000) : null };
+        }).filter((x: any) => {
+          if (waitingFilter && x.w !== waitingFilter) return false;
+          if (min_idle_days != null && (x.idle_days ?? -1) < min_idle_days) return false;
+          if (exclude_categories?.length && x.c.category_slugs && x.c.category_slugs.some((s: string) => exclude_categories.includes(s))) return false;
           return true;
-        }).slice(0, limit);
+        });
+        if (min_idle_days != null || waitingFilter === "me") annotated.sort((a: any, b: any) => (b.idle_days ?? -1) - (a.idle_days ?? -1));
+        const idleByKey: Record<string, number | null> = {};
+        for (const x of annotated) idleByKey[`${x.c.instance_id}|${x.c.chat_id}`] = x.idle_days;
+        let chats = annotated.slice(0, limit).map((x: any) => x.c);
 
         let contactById: Record<string, any> = {};
         if (useCategoryView && chats.length) {
@@ -469,6 +558,7 @@ Deno.serve(async (req) => {
             categories: categoriesByChat[ck(c)] || [],
             last_message_at: c.last_message_at, ...(c.last_message_at && { last_message_at_brt: toBRT(c.last_message_at) }),
             last_received_at: c.last_received_at, last_sent_at: c.last_sent_at, waiting_on,
+            idle_days: idleByKey[ck(c)] ?? null,
             last_message: msg ? { content: msg.content?.slice(0, 120), type: msg.message_type, from_me: msg.from_me, ...(AUDIO_TYPES.has(msg.message_type) && { transcription: msg.transcription }) } : null,
           };
         });
@@ -618,7 +708,10 @@ Deno.serve(async (req) => {
 
       case "send": {
         const { to, content = "", type = "text", media_url, file_name, reply_to, allow_new = false,
-          delay_typing, delay_message, mentions, mentions_everyone, force_send_after_inbound = false, instance, agent_name } = params;
+          delay_typing, delay_message, mentions, mentions_everyone, force_send_after_inbound = false, instance, agent_name,
+          confirmed = false, humanize = true } = params;
+        if (!confirmed) return json({ blocked: true, needs_confirmation: true, to, content: content || "(midia)", type, ...(media_url && { media_url }), instruction: "Mostre destinatario + conteudo ao usuario e so reenvie com confirmed:true apos ele confirmar." });
+        const effectiveDelayTyping = delay_typing !== undefined ? delay_typing : (humanize ? humanizedTypingSeconds(type, content) : undefined);
         const wantInstance = instance ? await resolveInstanceKey(instance) : null;
         if (instance && !wantInstance) return json({ error: `Instancia "${instance}" nao encontrada.` }, 400);
         let resolved = await resolveChat(to, instance);
@@ -658,7 +751,7 @@ Deno.serve(async (req) => {
         }
         const sendBody: any = { chat_id: resolved.chat_id, content, message_type: type, confirmed: true, agent_name: agent_name || "mcp-api", instance: targetInstance,
           ...(media_url && { media_url }), ...(file_name && { file_name }), ...(reply_to && { quoted_msg_id: reply_to }),
-          ...(delay_typing !== undefined && { delay_typing }), ...(delay_message !== undefined && { delay_message }),
+          ...(effectiveDelayTyping !== undefined && { delay_typing: effectiveDelayTyping }), ...(delay_message !== undefined && { delay_message }),
           ...(mentions?.length && { mentions }), ...(mentions_everyone && { mentions_everyone: true }) };
         const { status, data } = await callEdge("send-message", sendBody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-message ${status}`, detail: data }, status);
@@ -666,7 +759,8 @@ Deno.serve(async (req) => {
       }
 
       case "send_voice": {
-        const { to, text, voice_id, model_id, stability, similarity_boost, style, speed, instance, agent_name } = params;
+        const { to, text, voice_id, model_id, stability, similarity_boost, style, speed, instance, agent_name, confirmed = false } = params;
+        if (!confirmed) return json({ blocked: true, needs_confirmation: true, to, voice_id, text, instruction: "Mostre destinatario + texto + voice_id ao usuario e so reenvie com confirmed:true apos ele confirmar." });
         const resolved = await resolveChat(to, instance);
         if (resolved.error) return json({ ok: false, error: resolved.error });
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
@@ -689,7 +783,8 @@ Deno.serve(async (req) => {
       }
 
       case "edit_message": {
-        const { message_id, new_content } = params;
+        const { message_id, new_content, confirmed = false } = params;
+        if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id, new_content, instruction: "Mostre a mensagem e o novo texto ao usuario; reenvie com confirmed:true apos ele confirmar." });
         const { data: msg, error } = await supabase.from("messages").select("provider_msg_id,chat_id,from_me,message_ts,message_type,instance_id").eq("id", message_id).single();
         if (error || !msg) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
         if (!msg.from_me) return json({ error: "Nao da pra editar msg de outros." }, 400);
@@ -704,7 +799,8 @@ Deno.serve(async (req) => {
       }
 
       case "delete_message": {
-        const { message_id } = params;
+        const { message_id, confirmed = false } = params;
+        if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id, instruction: "Confirme com o usuario antes de apagar; reenvie com confirmed:true." });
         const { data: msg, error } = await supabase.from("messages").select("provider_msg_id,chat_id,from_me,instance_id").eq("id", message_id).single();
         if (error || !msg) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
         const phone = String(msg.chat_id).replace(/@.*$/, "");
@@ -715,8 +811,10 @@ Deno.serve(async (req) => {
       }
 
       case "zapi_action": {
-        const { action: zaction, params: zparams = {}, confirmed, instance } = params;
-        const { status, data } = await callEdge("zapi-proxy", { action: zaction, params: zparams, confirmed, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance });
+        const ZAPI_SEND_ACTIONS = new Set(["send-poll", "forward-message", "forward", "edit-message", "send-text", "send-message"]);
+        const { action: zaction, params: zparams = {}, confirmed = false, instance } = params;
+        if (ZAPI_SEND_ACTIONS.has(zaction) && !confirmed) return json({ blocked: true, needs_confirmation: true, action: zaction, params: zparams, instruction: `A action "${zaction}" envia conteudo. Mostre ao usuario e reenvie com confirmed:true apos confirmacao.` });
+        const { status, data } = await callEdge("zapi-proxy", { action: zaction, params: zparams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}`, detail: data }, status);
         return json({ ok: true, action: zaction, result: data?.result });
       }
@@ -778,9 +876,463 @@ Deno.serve(async (req) => {
         return json({ ok: true, total_groups_in_zapi: groups.length, updated_count: updated.length, not_found_count: not_found.length, updated, ...(not_found.length && { not_found }), dry_run });
       }
 
+      case "get_voice_guide": {
+        const g = await loadVoiceGuide(params.instance ? await resolveInstanceKey(params.instance) : null);
+        if (!g) return json({ ok: true, configured: false, message: "Voice guide nao configurado. Insira o markdown em public.voice_guide (content; instance_id NULL = global).", hard_rules: HARD_RULES.map((r) => ({ id: r.id, severity: r.severity })) });
+        return json({ ok: true, configured: true, scope: g.instance_id ?? "global", updated_at: g.updated_at, content: g.content });
+      }
+
+      case "check_message": {
+        const violations = checkVoiceViolations(params.content);
+        return json({ ok: true, has_violations: violations.length > 0, violations_count: violations.length, violations, ...(violations.length ? { hint: "Use get_voice_guide pra ler o documento e reescrever respeitando as regras hard." } : { message: "Nenhuma violacao hard. Texto compativel com o voice guide." }) });
+      }
+
+      case "setup_voice_guide": {
+        const g = await loadVoiceGuide(params.instance ? await resolveInstanceKey(params.instance) : null);
+        return json({
+          ok: true,
+          status: g ? "active" : "not_configured",
+          ...(g ? { scope: g.instance_id ?? "global", content_length: g.content.length, updated_at: g.updated_at } : { setup: "INSERT INTO voice_guide (content) VALUES ('<seu markdown>'); -- instance_id NULL = global" }),
+          hard_rules: HARD_RULES.map((r) => ({ id: r.id, severity: r.severity, message: r.message })),
+        });
+      }
+
       default: return json({ error: "action_not_implemented", action }, 400);
     }
   } catch (e) {
     return json({ error: String((e as Error)?.message ?? e) }, 500);
   }
+}
+
+// ─── MCP-over-HTTP (JSON-RPC 2.0, transport HTTP stateless) ───────────────────
+// Nome da tool MCP -> action interna (quando o nome diverge da action).
+const TOOL_TO_ACTION: Record<string, string> = {
+  transcribe_audio: "transcribe",
+  categorize_chat: "categorize",
+  uncategorize_chat: "uncategorize",
+  annotate_chat: "annotate",
+};
+
+function rpc(id: any, payload: Record<string, unknown>): Response {
+  return json({ jsonrpc: "2.0", id: id ?? null, ...payload });
+}
+const rpcResult = (id: any, result: unknown) => rpc(id, { result });
+const rpcError = (id: any, code: number, message: string) => rpc(id, { error: { code, message } });
+
+const SERVER_INFO = { name: "whatsapp-agent", version: "3.0.0" };
+const PROTOCOL_VERSION = "2024-11-05";
+
+// Schemas expostos no tools/list — MVP: status, inbox, read.
+// (as 17 actions restantes ja rodam via dispatchAction; entram no tools/list nos proximos passos)
+const TOOL_SCHEMAS = [
+  {
+    name: "status",
+    description: "Verifica se o WhatsApp esta conectado e funcionando (conexao Z-API + stats por instancia).",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "inbox",
+    description: "Lista conversas com a ultima mensagem de cada. Use waiting_on:'me' para 'do que estou devendo / quem espera resposta' (o contato mandou por ultimo) — combine com min_idle_days pra so as paradas ha N+ dias; o resultado ja vem ordenado por mais parado primeiro e traz idle_days por chat. Filtra tambem por categoria e grupos.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Max de chats (default 15)" },
+        since: { type: "string", description: "ISO timestamp — so chats com atividade apos esta data" },
+        waiting_on: { type: "string", enum: ["me", "lead", "none"], description: "Filtra por quem deve responder agora ('me' = voce esta devendo)" },
+        exclude_groups: { type: "boolean", description: "Se true, ignora grupos (so 1:1) — recomendado pra 'estou devendo'" },
+        category_slugs: { type: "array", items: { type: "string" }, description: "So chats com pelo menos uma destas categorias" },
+        exclude_categories: { type: "array", items: { type: "string" }, description: "Exclui chats com qualquer destas categorias (ex.: descartar, comunidade)" },
+        min_idle_days: { type: "number", description: "So chats parados ha N+ dias (pela ultima msg relevante). Ordena por mais parado primeiro." },
+        instance: { type: "string", description: "Filtra por instancia (alias 'pessoal'/'profissional' ou instance_id)" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read",
+    description: "Le as mensagens de uma conversa em ordem cronologica e JA transcreve os audios pendentes (Whisper) — use pra 'transcreve/resume a conversa com X' ou 'o que o fulano mandou'. 'chat' aceita nome, telefone ou chat_id; se ambiguo, retorna candidatos. Cada audio vem com o campo transcription.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat: { type: "string", description: "Nome, telefone ou chat_id da conversa" },
+        limit: { type: "number", description: "Numero de mensagens mais recentes (default 30)" },
+        before: { type: "string", description: "ISO timestamp — mensagens anteriores a esta data (paginar)" },
+        instance: { type: "string", description: "Instancia (alias ou instance_id)" },
+      },
+      required: ["chat"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "send",
+    description: "Envia mensagem (texto ou midia) pra contato/grupo. FLUXO OBRIGATORIO: 1a chamada SEM confirmed (mostra destinatario+conteudo e bloqueia); 2a com confirmed:true apos o usuario confirmar. 'to' aceita nome/telefone/chat_id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Destinatario: nome, telefone ou chat_id" },
+        content: { type: "string", description: "Texto ou legenda da midia" },
+        type: { type: "string", enum: ["text", "image", "audio", "ptt", "video", "document"], description: "Tipo (default text)" },
+        media_url: { type: "string", description: "URL publica da midia (obrigatorio se type != text)" },
+        file_name: { type: "string", description: "Nome do arquivo para type=document" },
+        reply_to: { type: "string", description: "UUID da mensagem para responder (quote)" },
+        confirmed: { type: "boolean", description: "OBRIGATORIO true para enviar; so apos o usuario confirmar" },
+        allow_new: { type: "boolean", description: "Permite enviar pra numero novo (primeiro contato); exige instance" },
+        humanize: { type: "boolean", description: "Calcula delay_typing automatico por tamanho/tipo (default true)" },
+        delay_typing: { type: "number", description: "Override do delay de digitacao (0-15s)" },
+        delay_message: { type: "number", description: "Atraso antes de enviar (0-15s)" },
+        mentions: { type: "array", items: { type: "string" }, description: "Phones pra mencionar (so em grupos)" },
+        mentions_everyone: { type: "boolean", description: "Menciona @todos no grupo" },
+        force_send_after_inbound: { type: "boolean", description: "Ignora o gate de inbound recente nao respondido" },
+        instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
+      },
+      required: ["to"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "send_voice",
+    description: "Gera audio TTS (ElevenLabs) e envia como mensagem de voz (PTT). FLUXO OBRIGATORIO: 1a chamada SEM confirmed (bloqueia); 2a com confirmed:true apos o usuario confirmar. voice_id vem da skill 'voz'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Destinatario: chat_id ou phone" },
+        text: { type: "string", description: "Texto a converter em fala (max 5000)" },
+        voice_id: { type: "string", description: "ElevenLabs voice ID (skill voz fornece)" },
+        model_id: { type: "string", description: "Modelo ElevenLabs (default eleven_turbo_v2_5)" },
+        stability: { type: "number", description: "0-1 (default 0.45)" },
+        similarity_boost: { type: "number", description: "0-1 (default 0.75)" },
+        style: { type: "number", description: "0-1 (default 0.30)" },
+        speed: { type: "number", description: "0.7-1.2 (default 0.95)" },
+        confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
+        instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
+      },
+      required: ["to", "text", "voice_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "search",
+    description: "Busca texto nas mensagens. Filtra por chat, categoria (category_slugs) e periodo (after/before). Audios nos resultados vem com transcription.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Texto a buscar (min 2 chars)" },
+        chat: { type: "string", description: "Limitar a um chat (nome ou chat_id)" },
+        search_in: { type: "string", enum: ["content", "chat_name", "both"], description: "Onde buscar (default both)" },
+        category_slugs: { type: "array", items: { type: "string" }, description: "So chats com pelo menos uma destas categorias" },
+        exclude_categories: { type: "array", items: { type: "string" }, description: "Exclui chats com qualquer destas" },
+        limit: { type: "number", description: "Max resultados (default 20)" },
+        after: { type: "string", description: "ISO timestamp — so mensagens apos esta data" },
+        before: { type: "string", description: "ISO timestamp — so mensagens antes desta data" },
+        instance: { type: "string", description: "Limitar a uma instancia (alias ou instance_id)" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "transcribe_audio",
+    description: "Forca transcricao de audios pendentes (grupos, antigos, ou que falharam no cron). Aceita message_id OU chat (ate 20 audios). Salva em messages.content.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "UUID da mensagem — transcreve so essa" },
+        chat: { type: "string", description: "Nome/phone/chat_id — transcreve ate 20 audios pendentes" },
+        limit: { type: "number", description: "Max audios por chamada com chat (default 20)" },
+        instance: { type: "string", description: "Instancia (alias ou instance_id)" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "react",
+    description: "Reage a uma mensagem com emoji. Precisa do message_id (UUID de read/search). String vazia remove a reacao.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "UUID da mensagem (campo id de read/search)" },
+        emoji: { type: "string", description: "Emoji de reacao (ex: '❤️', '👍'). Vazio remove." },
+      },
+      required: ["message_id", "emoji"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sync_groups",
+    description: "Sincroniza nomes de grupos buscando da Z-API (GET /chats). Use quando nomes de grupos estiverem faltando/desatualizados no banco.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: { type: "boolean", description: "Se true, lista o que seria atualizado sem salvar" },
+        instance: { type: "string", description: "De qual instancia sincronizar (alias ou instance_id)" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_categories",
+    description: "Lista as categorias disponiveis pra classificar chats. Use antes de categorize_chat pra saber os slugs validos.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "categorize_chat",
+    description: "Atribui uma ou mais categorias a um chat (idempotente). Use list_categories pra ver slugs validos.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat: { type: "string", description: "Nome, telefone ou chat_id" },
+        category_slugs: { type: "array", items: { type: "string" }, description: "Slugs a aplicar (ex: ['cliente','saude'])" },
+        assigned_by: { type: "string", enum: ["manual", "llm"], description: "Origem (default manual)" },
+        confidence: { type: "number", description: "0-1, obrigatorio quando assigned_by=llm" },
+        notes: { type: "string", description: "Justificativa opcional" },
+        instance: { type: "string", description: "Instancia (alias ou instance_id)" },
+      },
+      required: ["chat", "category_slugs"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "uncategorize_chat",
+    description: "Remove uma ou mais categorias de um chat (no-op se nao atribuidas).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat: { type: "string", description: "Nome, telefone ou chat_id" },
+        category_slugs: { type: "array", items: { type: "string" }, description: "Slugs a remover" },
+        instance: { type: "string", description: "Instancia (alias ou instance_id)" },
+      },
+      required: ["chat", "category_slugs"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "annotate_chat",
+    description: "Salva observacoes e/ou links sobre um contato/grupo (aparecem em read e inbox). Passe so o campo que quer atualizar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat: { type: "string", description: "Nome, telefone ou chat_id" },
+        observations: { type: "string", description: "Texto livre com contexto do contato" },
+        links: { type: "array", items: { type: "object", properties: { label: { type: "string" }, url: { type: "string" } }, required: ["label", "url"] }, description: "Links relevantes ({label, url})" },
+        instance: { type: "string", description: "Instancia (alias ou instance_id)" },
+      },
+      required: ["chat"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "edit_message",
+    description: "Edita o texto de uma mensagem enviada por voce (from_me, texto, ate 15min). FLUXO: 1a SEM confirmed (bloqueia); 2a com confirmed:true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "UUID da mensagem (de read/search)" },
+        new_content: { type: "string", description: "Novo texto" },
+        confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao" },
+      },
+      required: ["message_id", "new_content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "delete_message",
+    description: "Deleta uma mensagem enviada por voce (apaga pra todos). FLUXO: 1a SEM confirmed (bloqueia); 2a com confirmed:true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "UUID da mensagem (de read/search)" },
+        confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao" },
+      },
+      required: ["message_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "download_attachment",
+    description: "Retorna a URL publica de uma midia (imagem/audio/video/documento) do Storage. Precisa do message_id (de read/search).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "UUID da mensagem (de read/search)" },
+      },
+      required: ["message_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "zapi_action",
+    description: "Executa qualquer acao avancada da Z-API (operacoes infrequentes nao cobertas pelas tools). Actions de envio (send-poll, forward, edit-message) exigem confirmed:true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", description: "Nome do endpoint Z-API (ex: read-chat, send-poll, create-group)" },
+        params: { type: "object", description: "Parametros da action", additionalProperties: true },
+        confirmed: { type: "boolean", description: "Obrigatorio true para actions de envio" },
+        instance: { type: "string", description: "De qual numero (alias ou instance_id)" },
+      },
+      required: ["action", "params"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_voice_guide",
+    description: "Retorna o voice guide do dono (markdown) — como ele se comunica (lexico, sintaxe, anti-padroes). Use antes de redigir mensagem em nome dele.",
+    inputSchema: {
+      type: "object",
+      properties: { instance: { type: "string", description: "Instancia (alias ou instance_id); omitir = global" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "check_message",
+    description: "Verifica se um texto viola alguma regra hard do voice guide (tu/teu, em-dash, hype, saudacoes genericas, validacao afetiva, etc). Warning, nao bloqueio — use antes de send pra revisar drafts.",
+    inputSchema: {
+      type: "object",
+      properties: { content: { type: "string", description: "Texto a verificar" } },
+      required: ["content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "setup_voice_guide",
+    description: "Mostra o status do voice guide (configurado ou nao) e lista as regras hard ativas.",
+    inputSchema: {
+      type: "object",
+      properties: { instance: { type: "string", description: "Instancia (alias ou instance_id)" } },
+      additionalProperties: false,
+    },
+  },
+];
+
+async function handleMcp(reqBody: any): Promise<Response> {
+  const { method, params, id } = reqBody;
+  switch (method) {
+    case "initialize":
+      return rpcResult(id, { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO });
+    case "tools/list":
+      return rpcResult(id, { tools: TOOL_SCHEMAS });
+    case "ping":
+      return rpcResult(id, {});
+    case "tools/call": {
+      const name = params?.name;
+      if (typeof name !== "string") return rpcError(id, -32602, "params.name obrigatorio");
+      const action = TOOL_TO_ACTION[name] ?? name;
+      const resp = await dispatchAction(action, params?.arguments ?? {});
+      const data = await resp.json();
+      const isError = !!data?.error || data?.ok === false;
+      return rpcResult(id, { content: [{ type: "text", text: JSON.stringify(data) }], ...(isError && { isError: true }) });
+    }
+    default:
+      if (typeof method === "string" && method.startsWith("notifications/")) return new Response(null, { status: 202, headers: cors });
+      return rpcError(id ?? null, -32601, `Method not found: ${method}`);
+  }
+}
+
+// ─── HTTP entrypoint ──────────────────────────────────────────────────────────
+// 401 com o ponteiro pro Protected Resource Metadata — dispara o fluxo OAuth no cliente.
+function unauthorized() {
+  return new Response(JSON.stringify({ error: "unauthorized" }), {
+    status: 401,
+    headers: { ...cors, "Content-Type": "application/json", "WWW-Authenticate": `Bearer resource_metadata="${PRM_URL}"` },
+  });
+}
+function oauthErr(error: string, status = 400, desc?: string) {
+  return json({ error, ...(desc && { error_description: desc }) }, status);
+}
+
+// Aceita a chave estatica (Claude Code) OU um access_token JWT que nos emitimos (Desktop/Web).
+async function isAuthorized(req: Request): Promise<boolean> {
+  const xkey = req.headers.get("x-mcp-key") ?? "";
+  const bearer = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+  if (MCP_API_KEY && (timingSafeEqual(xkey, MCP_API_KEY) || timingSafeEqual(bearer, MCP_API_KEY))) return true;
+  if (bearer) {
+    const p = await jwtVerify(bearer, MCP_API_KEY);
+    if (p && p.t === "access") return true;
+  }
+  return false;
+}
+
+// /authorize — AUTO-APROVA (sem tela): valida client_id + PKCE e devolve 302 com o code.
+async function handleAuthorize(url: URL): Promise<Response> {
+  const q = url.searchParams;
+  const responseType = q.get("response_type");
+  const clientId = q.get("client_id") ?? "";
+  const redirectUri = q.get("redirect_uri") ?? "";
+  const state = q.get("state") ?? "";
+  const challenge = q.get("code_challenge") ?? "";
+  const method = q.get("code_challenge_method") ?? "";
+  if (responseType !== "code" || !redirectUri) return oauthErr("invalid_request", 400, "response_type=code e redirect_uri obrigatorios");
+  if (!OAUTH_CLIENT_ID || !timingSafeEqual(clientId, OAUTH_CLIENT_ID)) return oauthErr("unauthorized_client", 400);
+  if (!challenge || method !== "S256") return oauthErr("invalid_request", 400, "PKCE S256 obrigatorio");
+  const code = await jwtSign({ t: "code", cc: challenge, ru: redirectUri, exp: Math.floor(Date.now() / 1000) + 120 }, MCP_API_KEY);
+  const sep = redirectUri.includes("?") ? "&" : "?";
+  const loc = `${redirectUri}${sep}code=${encodeURIComponent(code)}${state ? `&state=${encodeURIComponent(state)}` : ""}`;
+  return new Response(null, { status: 302, headers: { ...cors, "Location": loc } });
+}
+
+// /token — confidential client (client_secret) + PKCE -> emite o access_token JWT.
+async function handleToken(req: Request): Promise<Response> {
+  const ct = req.headers.get("content-type") ?? "";
+  const raw = await req.text();
+  let q: URLSearchParams;
+  if (ct.includes("application/json")) {
+    try { q = new URLSearchParams(JSON.parse(raw)); } catch { return oauthErr("invalid_request"); }
+  } else { q = new URLSearchParams(raw); }
+  let clientId = q.get("client_id") ?? "";
+  let clientSecret = q.get("client_secret") ?? "";
+  const authz = req.headers.get("authorization") ?? "";
+  if (authz.startsWith("Basic ")) {
+    try { const d = atob(authz.slice(6)); const i = d.indexOf(":"); clientId = d.slice(0, i); clientSecret = d.slice(i + 1); } catch { /* ignore */ }
+  }
+  if (q.get("grant_type") !== "authorization_code") return oauthErr("unsupported_grant_type");
+  if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) return oauthErr("server_error", 500, "OAUTH_CLIENT_* nao configurado");
+  if (!timingSafeEqual(clientId, OAUTH_CLIENT_ID) || !timingSafeEqual(clientSecret, OAUTH_CLIENT_SECRET)) return oauthErr("invalid_client", 401);
+  const claims = await jwtVerify(q.get("code") ?? "", MCP_API_KEY);
+  if (!claims || claims.t !== "code") return oauthErr("invalid_grant", 400, "code invalido ou expirado");
+  if (claims.ru !== (q.get("redirect_uri") ?? "")) return oauthErr("invalid_grant", 400, "redirect_uri mismatch");
+  const verifier = q.get("code_verifier") ?? "";
+  if (!verifier || (await sha256b64url(verifier)) !== claims.cc) return oauthErr("invalid_grant", 400, "PKCE mismatch");
+  const access = await jwtSign({ t: "access", sub: "owner", iss: RESOURCE_URL, exp: Math.floor(Date.now() / 1000) + 3600 }, MCP_API_KEY);
+  return json({ access_token: access, token_type: "Bearer", expires_in: 3600, scope: "mcp" });
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response(null, { headers: cors });
+  const url = new URL(req.url);
+  const path = url.pathname;
+
+  // ── Discovery + OAuth (publicos, sem auth) ──
+  if (req.method === "GET" && path.endsWith("/.well-known/oauth-protected-resource")) {
+    return json({ resource: RESOURCE_URL, authorization_servers: [RESOURCE_URL], bearer_methods_supported: ["header"], scopes_supported: ["mcp"] });
+  }
+  if (req.method === "GET" && (path.endsWith("/.well-known/oauth-authorization-server") || path.endsWith("/.well-known/openid-configuration"))) {
+    return json({
+      issuer: RESOURCE_URL,
+      authorization_endpoint: `${RESOURCE_URL}/authorize`,
+      token_endpoint: `${RESOURCE_URL}/token`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code"],
+      code_challenge_methods_supported: ["S256"],
+      token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
+      scopes_supported: ["mcp"],
+    });
+  }
+  if (req.method === "GET" && path.endsWith("/authorize")) return handleAuthorize(url);
+  if (req.method === "POST" && path.endsWith("/token")) return handleToken(req);
+
+  // ── MCP (protegido) ──
+  if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  if (!MCP_API_KEY) return json({ error: "server_misconfigured: MCP_API_KEY ausente" }, 500);
+  if (!(await isAuthorized(req))) return unauthorized();
+
+  let body: any;
+  try { body = await req.json(); } catch { return json({ error: "invalid json" }, 400); }
+
+  // MCP-over-HTTP (JSON-RPC) vs API legada { action, params }
+  if (body && (body.jsonrpc === "2.0" || typeof body.method === "string")) {
+    return handleMcp(body);
+  }
+  const { action, params = {} } = body ?? {};
+  if (typeof action !== "string") return json({ error: "action obrigatorio" }, 400);
+  return dispatchAction(action, params);
 });

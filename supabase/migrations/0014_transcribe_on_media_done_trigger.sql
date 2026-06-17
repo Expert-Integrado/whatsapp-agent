@@ -33,10 +33,7 @@ BEGIN
     IF msg_type IN ('ptt', 'audio')
        AND (msg_content IS NULL OR msg_content = '')
        AND is_private THEN
-      PERFORM net.http_post(
-        url := 'https://<SUPABASE_PROJECT_ID>.supabase.co/functions/v1/transcribe-queue?id=' || NEW.message_id::text,
-        headers := '{"Authorization":"Bearer <SUPABASE_SERVICE_ROLE_KEY>"}'::jsonb
-      );
+      PERFORM public.call_edge_function('/functions/v1/transcribe-queue?id=' || NEW.message_id::text);
     END IF;
   END IF;
   RETURN NEW;

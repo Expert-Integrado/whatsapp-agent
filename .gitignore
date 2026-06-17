@@ -6,7 +6,9 @@ mcp/.env
 .DS_Store
 *.log
 supabase/.temp/
-.claude/
+# Ignora .claude/ (configs locais) EXCETO as project skills versionadas (ex.: setup)
+.claude/*
+!.claude/skills/
 *.bak-*
 
 # Playwright MCP cache + accidental Windows redirect artifacts (added 2026-05-28)

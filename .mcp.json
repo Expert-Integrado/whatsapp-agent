@@ -1,15 +1,10 @@
 {
   "mcpServers": {
     "whatsapp-agent": {
-      "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/index.js"],
-      "env": {
-        "SUPABASE_URL": "",
-        "SUPABASE_SERVICE_ROLE_KEY": "",
-        "ZAPI_INSTANCE_ID": "",
-        "ZAPI_TOKEN": "",
-        "ZAPI_CLIENT_TOKEN": "",
-        "OPENAI_API_KEY": ""
+      "type": "http",
+      "url": "${WHATSAPP_AGENT_MCP_URL}",
+      "headers": {
+        "x-mcp-key": "${MCP_API_KEY}"
       }
     }
   }
