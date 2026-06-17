@@ -86,6 +86,18 @@ async function checkRateLimit(instanceId: string, chat_id: string): Promise<{ ok
   return { ok: true };
 }
 
+// @todos em grupos: a Z-API nao tem "mencionar todos" nativo. Busca os participantes
+// do grupo via group-metadata e devolve os phones pra preencher o array `mentioned`.
+async function fetchGroupParticipants(base: string, headers: Record<string, string>, groupId: string): Promise<string[]> {
+  try {
+    const r = await fetch(`${base}/group-metadata/${encodeURIComponent(groupId)}`, { headers });
+    if (!r.ok) return [];
+    const m = await r.json();
+    const parts = Array.isArray(m?.participants) ? m.participants : [];
+    return parts.map((p: any) => p?.phone).filter((p: any): p is string => typeof p === "string" && p.length > 0);
+  } catch { return []; }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
 
@@ -168,10 +180,22 @@ Deno.serve(async (req) => {
     }
   }
 
+  // @todos: menciona explicitos (mentions) e, se mentions_everyone num grupo,
+  // expande pra todos os participantes (Z-API nao tem mentionsEveryOne funcional).
+  let mentionedList: string[] = Array.isArray(mentions) ? mentions.filter((m: any): m is string => typeof m === "string") : [];
+  if (mentions_everyone && chat.is_group) {
+    const all = await fetchGroupParticipants(base, headers, phone);
+    if (all.length) mentionedList = all;
+  }
+  // A Z-API so renderiza a mencao quando o TEXTO contem @<numero> (alem do array
+  // `mentioned`). Anexa ao texto os tokens que ainda nao estiverem nele.
+  const mentionTokens = mentionedList.filter((p) => !(content ?? "").includes(`@${p}`)).map((p) => `@${p}`);
+  const withMentions = (txt: string) => mentionTokens.length ? `${txt}${txt ? " " : ""}${mentionTokens.join(" ")}`.trim() : txt;
+
   let endpoint: string, zapiBody: any;
   switch (message_type) {
-    case "text":     endpoint = `${base}/send-text`;         zapiBody = { phone, message: content, ...(resolvedQuotedId && { messageId: resolvedQuotedId }), ...(mentions?.length && { mentioned: mentions }), ...(mentions_everyone && { mentionsEveryOne: true }) }; break;
-    case "image":    endpoint = `${base}/send-image`;        zapiBody = { phone, image: media_url, caption: content ?? "", ...(resolvedQuotedId && { messageId: resolvedQuotedId }) }; break;
+    case "text":     endpoint = `${base}/send-text`;         zapiBody = { phone, message: withMentions(content ?? ""), ...(resolvedQuotedId && { messageId: resolvedQuotedId }), ...(mentionedList.length && { mentioned: mentionedList }) }; break;
+    case "image":    endpoint = `${base}/send-image`;        zapiBody = { phone, image: media_url, caption: withMentions(content ?? ""), ...(resolvedQuotedId && { messageId: resolvedQuotedId }), ...(mentionedList.length && { mentioned: mentionedList }) }; break;
     case "audio":    endpoint = `${base}/send-audio`;        zapiBody = { phone, audio: media_url, ...(resolvedQuotedId && { messageId: resolvedQuotedId }) }; break;
     case "ptt":      endpoint = `${base}/send-audio`;        zapiBody = { phone, audio: media_url, waveform: true, ...(resolvedQuotedId && { messageId: resolvedQuotedId }) }; break;
     // NOTA (09/05/2026): commits 02de721 (array) e eb01682 (base64 string) tentaram exibir waveform real
@@ -179,7 +203,7 @@ Deno.serve(async (req) => {
     // ate identificarmos formato aceito (provavelmente requer endpoint diferente ou conversao server-side
     // pra OGG/Opus + amplitudes em base64 com Content-Type especifico). Priorizar funcionamento basico
     // do envio. Investigar formato correto em sessao dedicada.
-    case "video":    endpoint = `${base}/send-video`;        zapiBody = { phone, video: media_url, caption: content ?? "", ...(resolvedQuotedId && { messageId: resolvedQuotedId }) }; break;
+    case "video":    endpoint = `${base}/send-video`;        zapiBody = { phone, video: media_url, caption: withMentions(content ?? ""), ...(resolvedQuotedId && { messageId: resolvedQuotedId }), ...(mentionedList.length && { mentioned: mentionedList }) }; break;
     case "document": endpoint = `${base}/send-document/pdf`; zapiBody = { phone, document: media_url, fileName: file_name ?? content ?? "document.pdf", ...(file_name && content ? { caption: content } : {}), ...(resolvedQuotedId && { messageId: resolvedQuotedId }) }; break;
     default:         endpoint = `${base}/send-text`;         zapiBody = { phone, message: content ?? "", ...(resolvedQuotedId && { messageId: resolvedQuotedId }) };
   }

@@ -1,6 +1,6 @@
 # WhatsApp Agent
 
-**v2.1.1** · [Changelog](CHANGELOG.md) · [Guia de migração v1 → v2](MIGRATION.md)
+**v2.2** · [Changelog](CHANGELOG.md) · [Guia de migração v1 → v2](MIGRATION.md)
 
 **Seu WhatsApp, operado por IA.** Um backend headless que conecta o seu número de WhatsApp ao Claude — que lê, resume, transcreve áudios, categoriza contatos e responde por você, tudo em linguagem natural.
 

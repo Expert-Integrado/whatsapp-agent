@@ -2,6 +2,11 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [2.2.0] — 2026-06-17
+
+### Fixed
+- **Menção "@todos" em grupos** agora funciona de verdade. A Z-API não tem "mencionar todos" nativo e o antigo `mentionsEveryOne` não surtia efeito. A edge `send-message` passa a: buscar os participantes via `group-metadata`, **injetar os tokens `@<número>` no texto** E preencher o array `mentioned` — a Z-API exige os dois. Aplicado a **texto, imagem e vídeo**; `mentionsEveryOne` removido. (Porte do fix do Eric, commit c2f8d92.)
+
 ## [2.1.1] — 2026-06-17
 
 ### Fixed
