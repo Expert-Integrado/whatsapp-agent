@@ -2,6 +2,11 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [2.2.1] — 2026-06-17
+
+### Fixed
+- O setup passa a configurar o `INTERNAL_EDGE_JWT` (service_role no formato **JWT legado**). A `SUPABASE_SERVICE_ROLE_KEY` auto-injetada vem no formato novo (não-JWT), que o **Storage** rejeita com `400` — sem o `INTERNAL_EDGE_JWT`, o download de áudio (transcrição Whisper) e as chamadas edge→edge falhavam. Passo 3 da skill `setup` atualizado com a explicação.
+
 ## [2.2.0] — 2026-06-17
 
 ### Fixed

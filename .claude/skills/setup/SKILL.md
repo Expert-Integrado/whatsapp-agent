@@ -102,10 +102,11 @@ Gere um `MCP_API_KEY` aleatorio (32+ chars; ele e a chave que protege a `mcp-api
 supabase secrets set --project-ref <SUPABASE_PROJECT_REF> \
   MCP_API_KEY=<aleatorio> \
   ZAPI_INSTANCE_ID=... ZAPI_TOKEN=... ZAPI_CLIENT_TOKEN=... \
-  OPENAI_API_KEY=sk-...
+  OPENAI_API_KEY=sk-... \
+  INTERNAL_EDGE_JWT=<SUPABASE_SERVICE_ROLE_KEY>
 ```
 
-> O `SUPABASE_URL` e a `service_role`/secret key o Supabase **injeta automaticamente** nas functions — nao precisa setar.
+> O `SUPABASE_URL` e a `SUPABASE_SERVICE_ROLE_KEY` o Supabase **injeta automaticamente** nas functions. **Mas** a chave auto-injetada vem no formato novo (não-JWT), que o **Storage** e o gateway `verify_jwt` rejeitam. Por isso o `INTERNAL_EDGE_JWT` recebe o **service_role no formato JWT legado** (`eyJ…`, em *Settings → API Keys → Legacy*): é ele que as functions usam pra baixar áudio do Storage (transcrição) e pra chamadas edge→edge. Sem ele, o download de mídia falha com `400`.
 
 ---
 
