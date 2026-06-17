@@ -2,6 +2,11 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [2.1.1] — 2026-06-17
+
+### Fixed
+- Setup do webhook Z-API agora liga o `receiveCallbackSentByMe` via o endpoint dedicado **`update-notify-sent-by-me`**. Sem isso, as mensagens **enviadas pelo dono** não chegavam ao `process-webhook` e ficavam de fora do banco (só as recebidas eram registradas). O passo 5 da skill `setup` passou de "configure pelo painel" para os 3 comandos `curl` concretos (received + delivery + notify-sent-by-me) com verificação no `/me`.
+
 ## [2.1.0] — 2026-06-17
 
 ### Added

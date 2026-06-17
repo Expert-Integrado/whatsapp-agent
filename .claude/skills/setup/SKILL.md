@@ -125,13 +125,21 @@ Confirme: `supabase functions list --project-ref <ref>` — todas `ACTIVE`.
 
 ## 5. Webhook da Z-API
 
-Registre o webhook da sua instancia Z-API apontando pra:
+Aponte os webhooks da instancia pro `process-webhook` **e** ligue a notificacao de mensagens **enviadas por voce** — sem o ultimo passo, so as mensagens recebidas entram no banco (as que voce envia ficam de fora). Tres chamadas (use `ZAPI_INSTANCE_ID`/`ZAPI_TOKEN`/`ZAPI_CLIENT_TOKEN` do `.env`):
 
-```
-https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/process-webhook
+```bash
+HOOK="https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/process-webhook"
+ZBASE="https://api.z-api.io/instances/$ZAPI_INSTANCE_ID/token/$ZAPI_TOKEN"
+
+# mensagens recebidas
+curl -s -X PUT "$ZBASE/update-webhook-received" -H "Client-Token: $ZAPI_CLIENT_TOKEN" -H "Content-Type: application/json" -d "{\"value\":\"$HOOK\"}"
+# status de entrega
+curl -s -X PUT "$ZBASE/update-webhook-delivery" -H "Client-Token: $ZAPI_CLIENT_TOKEN" -H "Content-Type: application/json" -d "{\"value\":\"$HOOK\"}"
+# ESSENCIAL: notificar as mensagens que VOCE envia (endpoint dedicado — nao e o notifySentByMe do update-webhook-received)
+curl -s -X PUT "$ZBASE/update-notify-sent-by-me" -H "Client-Token: $ZAPI_CLIENT_TOKEN" -H "Content-Type: application/json" -d '{"notifySentByMe":true}'
 ```
 
-Eventos: mensagem recebida, status de envio, presenca, etc. — pelo painel da Z-API.
+Confirme em `GET $ZBASE/me` (header `Client-Token`): `receivedCallbackUrl`/`deliveryCallbackUrl` apontando pro `process-webhook` **e `receiveCallbackSentByMe: true`**.
 
 ---
 
