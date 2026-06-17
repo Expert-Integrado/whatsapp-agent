@@ -2,6 +2,13 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [2.1.0] — 2026-06-17
+
+### Added
+- **Refresh token** no OAuth da `mcp-api`. O `/token` passa a emitir um `refresh_token` **sem expiração** junto do `access_token` (1h) e a aceitar `grant_type=refresh_token`. O cliente renova o access sozinho em background — a conexão do connector (Claude Desktop/Web) **não cai mais** sem reconexão manual. Segurança: access curto que rotaciona, refresh protegido pelo `client_secret`; *kill switch* = rotacionar a `MCP_API_KEY` invalida todos os tokens. O AS metadata anuncia `grant_types_supported: [authorization_code, refresh_token]`.
+
+> Quem já conectou na v2.0 deve **remover e re-adicionar o connector uma vez** para receber o `refresh_token`; daí em diante não reconecta mais.
+
 ## [2.0.0] — 2026-06-17
 
 Reescrita arquitetural. O MCP deixa de rodar **local (stdio)** e passa a ser um **servidor MCP remoto sobre HTTP**, hospedado nas Edge Functions do Supabase. A operação fica **agnóstica de harness**: funciona em qualquer app de IA com suporte a MCP (Claude Code, Desktop, Web e outros). Guia de migração: [`MIGRATION.md`](MIGRATION.md).

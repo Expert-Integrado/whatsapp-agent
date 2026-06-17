@@ -1270,7 +1270,11 @@ async function handleAuthorize(url: URL): Promise<Response> {
   return new Response(null, { status: 302, headers: { ...cors, "Location": loc } });
 }
 
-// /token — confidential client (client_secret) + PKCE -> emite o access_token JWT.
+// /token — confidential client (client_secret) + (PKCE no auth_code | refresh_token).
+// Emite access_token curto (1h) + refresh_token sem expiracao: o cliente renova o
+// access sozinho via grant_type=refresh_token, entao a conexao nunca "cai" sem o
+// usuario reconectar. Kill switch: rotacionar MCP_API_KEY invalida todos os tokens.
+const ACCESS_TTL = 3600; // 1h
 async function handleToken(req: Request): Promise<Response> {
   const ct = req.headers.get("content-type") ?? "";
   const raw = await req.text();
@@ -1284,16 +1288,30 @@ async function handleToken(req: Request): Promise<Response> {
   if (authz.startsWith("Basic ")) {
     try { const d = atob(authz.slice(6)); const i = d.indexOf(":"); clientId = d.slice(0, i); clientSecret = d.slice(i + 1); } catch { /* ignore */ }
   }
-  if (q.get("grant_type") !== "authorization_code") return oauthErr("unsupported_grant_type");
   if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) return oauthErr("server_error", 500, "OAUTH_CLIENT_* nao configurado");
   if (!timingSafeEqual(clientId, OAUTH_CLIENT_ID) || !timingSafeEqual(clientSecret, OAUTH_CLIENT_SECRET)) return oauthErr("invalid_client", 401);
-  const claims = await jwtVerify(q.get("code") ?? "", MCP_API_KEY);
-  if (!claims || claims.t !== "code") return oauthErr("invalid_grant", 400, "code invalido ou expirado");
-  if (claims.ru !== (q.get("redirect_uri") ?? "")) return oauthErr("invalid_grant", 400, "redirect_uri mismatch");
-  const verifier = q.get("code_verifier") ?? "";
-  if (!verifier || (await sha256b64url(verifier)) !== claims.cc) return oauthErr("invalid_grant", 400, "PKCE mismatch");
-  const access = await jwtSign({ t: "access", sub: "owner", iss: RESOURCE_URL, exp: Math.floor(Date.now() / 1000) + 3600 }, MCP_API_KEY);
-  return json({ access_token: access, token_type: "Bearer", expires_in: 3600, scope: "mcp" });
+
+  const issue = async () => {
+    const access = await jwtSign({ t: "access", sub: "owner", iss: RESOURCE_URL, exp: Math.floor(Date.now() / 1000) + ACCESS_TTL }, MCP_API_KEY);
+    const refresh = await jwtSign({ t: "refresh", sub: "owner", iss: RESOURCE_URL }, MCP_API_KEY); // sem exp
+    return json({ access_token: access, token_type: "Bearer", expires_in: ACCESS_TTL, refresh_token: refresh, scope: "mcp" });
+  };
+
+  const grant = q.get("grant_type");
+  if (grant === "authorization_code") {
+    const claims = await jwtVerify(q.get("code") ?? "", MCP_API_KEY);
+    if (!claims || claims.t !== "code") return oauthErr("invalid_grant", 400, "code invalido ou expirado");
+    if (claims.ru !== (q.get("redirect_uri") ?? "")) return oauthErr("invalid_grant", 400, "redirect_uri mismatch");
+    const verifier = q.get("code_verifier") ?? "";
+    if (!verifier || (await sha256b64url(verifier)) !== claims.cc) return oauthErr("invalid_grant", 400, "PKCE mismatch");
+    return issue();
+  }
+  if (grant === "refresh_token") {
+    const rt = await jwtVerify(q.get("refresh_token") ?? "", MCP_API_KEY);
+    if (!rt || rt.t !== "refresh") return oauthErr("invalid_grant", 400, "refresh_token invalido");
+    return issue();
+  }
+  return oauthErr("unsupported_grant_type");
 }
 
 Deno.serve(async (req) => {
@@ -1311,7 +1329,7 @@ Deno.serve(async (req) => {
       authorization_endpoint: `${RESOURCE_URL}/authorize`,
       token_endpoint: `${RESOURCE_URL}/token`,
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code"],
+      grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
       scopes_supported: ["mcp"],
