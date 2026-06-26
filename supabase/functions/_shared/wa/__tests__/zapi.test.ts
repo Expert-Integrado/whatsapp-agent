@@ -198,6 +198,131 @@ Deno.test("zapi.verifyWebhookAuth compara header z-api-token com creds", () => {
   assertEquals(z.verifyWebhookAuth({}, headers, creds), false);
 });
 
+// ── fetchMedia ───────────────────────────────────────────────────────────────
+
+Deno.test("zapi.fetchMedia faz GET e devolve bytes", async () => {
+  const orig = globalThis.fetch;
+  globalThis.fetch = ((_url: string | URL | Request, _init?: RequestInit) =>
+    Promise.resolve(new Response(new Uint8Array([1, 2, 3]), { status: 200 }))
+  ) as typeof fetch;
+  try {
+    const out = await z.fetchMedia(creds, {
+      strategy: "url",
+      url: "https://x/a.jpg",
+      mime: "image/jpeg",
+      bucket: "whatsapp-images",
+      ext: "jpg",
+    });
+    assertEquals(out.bytes.length, 3);
+    assertEquals(out.mime, "image/jpeg");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+Deno.test("zapi.fetchMedia usa mime padrão quando ref.mime é null", async () => {
+  const orig = globalThis.fetch;
+  globalThis.fetch = ((_url: string | URL | Request, _init?: RequestInit) =>
+    Promise.resolve(new Response(new Uint8Array([9]), { status: 200 }))
+  ) as typeof fetch;
+  try {
+    const out = await z.fetchMedia(creds, {
+      strategy: "url",
+      url: "https://x/doc.bin",
+      mime: null,
+      bucket: "whatsapp-documents",
+      ext: "bin",
+    });
+    assertEquals(out.mime, "application/octet-stream");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+// ── resolveChatIds ────────────────────────────────────────────────────────────
+
+Deno.test("zapi.resolveChatIds resolve @lid via cache (camada 1)", async () => {
+  const fakeSupabase = {
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: { phone: "5511999" } }),
+          }),
+        }),
+      }),
+    }),
+  };
+  const ev = {
+    kind: "message",
+    chatId: "ABC@lid",
+    fromMe: true,
+    isGroup: false,
+    chatName: "Test User",
+    providerMsgId: "M1",
+    messageType: "text",
+    content: "hello",
+    caption: null,
+    quotedProviderId: null,
+    isForwarded: false,
+    timestamp: new Date().toISOString(),
+    senderPhone: null,
+    senderName: null,
+    media: null,
+    raw: {},
+  } as any;
+  const out = await z.resolveChatIds!([ev], creds, { supabase: fakeSupabase });
+  assertEquals((out[0] as any).chatId, "5511999");
+});
+
+Deno.test("zapi.resolveChatIds não modifica evento sem @lid", async () => {
+  const fakeSupabase = { from: () => { throw new Error("should not be called"); } };
+  const ev = {
+    kind: "message",
+    chatId: "5511999@s.whatsapp.net",
+    fromMe: true,
+    isGroup: false,
+    chatName: null,
+    providerMsgId: "M2",
+    messageType: "text",
+    content: "oi",
+    caption: null,
+    quotedProviderId: null,
+    isForwarded: false,
+    timestamp: new Date().toISOString(),
+    senderPhone: null,
+    senderName: null,
+    media: null,
+    raw: {},
+  } as any;
+  const out = await z.resolveChatIds!([ev], creds, { supabase: fakeSupabase });
+  assertEquals((out[0] as any).chatId, "5511999@s.whatsapp.net");
+});
+
+Deno.test("zapi.resolveChatIds não modifica @lid em grupo", async () => {
+  const fakeSupabase = { from: () => { throw new Error("should not be called"); } };
+  const ev = {
+    kind: "message",
+    chatId: "GRP@lid",
+    fromMe: true,
+    isGroup: true,
+    chatName: null,
+    providerMsgId: "M3",
+    messageType: "text",
+    content: "oi",
+    caption: null,
+    quotedProviderId: null,
+    isForwarded: false,
+    timestamp: new Date().toISOString(),
+    senderPhone: null,
+    senderName: null,
+    media: null,
+    raw: {},
+  } as any;
+  const out = await z.resolveChatIds!([ev], creds, { supabase: fakeSupabase });
+  assertEquals((out[0] as any).chatId, "GRP@lid");
+});
+
 // ── mentionsEveryone ─────────────────────────────────────────────────────────
 
 // Testa mentionsEveryone via stub de globalThis.fetch

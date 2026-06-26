@@ -4,6 +4,7 @@ import type {
 } from "./types.ts";
 import type { WaProvider } from "./provider.ts";
 import { registerProvider } from "./provider.ts";
+import { isLidJid } from "./jid.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -24,6 +25,115 @@ async function fetchGroupParticipants(
   } catch {
     return [];
   }
+}
+
+// ─── fetchMedia helpers ──────────────────────────────────────────────────────
+
+/** Timeout per bucket — ported from process-webhook/index.ts:447-454 */
+const DL_TIMEOUT_MS: Record<string, number> = {
+  "whatsapp-audio":     30000,
+  "whatsapp-video":     45000,
+  "whatsapp-documents": 30000,
+  "whatsapp-images":    15000,
+  "whatsapp-stickers":  10000,
+};
+
+/**
+ * GET with retry — ported from process-webhook/index.ts:456-475.
+ * Tries `attempts` times with 500ms delay between failures.
+ */
+async function zapieFetchWithRetry(url: string, timeoutMs: number, attempts = 2): Promise<Uint8Array> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), timeoutMs);
+      const res = await fetch(url, {
+        signal: ac.signal,
+        headers: { "User-Agent": "whatsapp-agent/1.0" },
+      });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`fetch ${res.status}`);
+      return new Uint8Array(await res.arrayBuffer());
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  throw lastErr;
+}
+
+// ─── resolveChatIds helpers ──────────────────────────────────────────────────
+
+/**
+ * 3-layer @lid → phone resolution — ported from process-webhook/index.ts:69-136.
+ *   1. Cache lookup in lid_mapping (scoped by instance_id)
+ *   2. Match by chat_name → most recent numeric chat in chats table
+ *   3. Z-API GET /contacts/<lid> using creds, writing to lid_mapping on success
+ */
+async function zapiResolveLidToPhone(
+  lid: string,
+  chatName: string | null,
+  instanceId: string,
+  creds: InstanceCreds,
+  supabase: any,
+): Promise<{ phone: string | null; via: string }> {
+  // Layer 1: cache
+  const { data: cached } = await supabase
+    .from("lid_mapping")
+    .select("phone")
+    .eq("instance_id", instanceId)
+    .eq("lid", lid)
+    .maybeSingle();
+  if (cached?.phone) return { phone: cached.phone, via: "cache" };
+
+  // Layer 2: chat_name → most recent numeric chat_id (same instance)
+  if (chatName) {
+    const { data: existing } = await supabase
+      .from("chats")
+      .select("chat_id")
+      .eq("instance_id", instanceId)
+      .eq("chat_name", chatName)
+      .not("chat_id", "like", "%@lid")
+      .not("chat_id", "like", "%-group")
+      .not("chat_id", "like", "%@g.us")
+      .order("last_message_at", { ascending: false, nullsFirst: false })
+      .limit(1);
+    const cid = existing?.[0]?.chat_id;
+    if (cid && /^\d+$/.test(cid)) {
+      await supabase
+        .from("lid_mapping")
+        .upsert({ instance_id: instanceId, lid, phone: cid, chat_name: chatName, resolved_via: "chat_name" });
+      return { phone: cid, via: "chat_name" };
+    }
+  }
+
+  // Layer 3: Z-API contacts endpoint
+  try {
+    const base = `https://api.z-api.io/instances/${creds.instance_id}/token/${creds.auth_token}`;
+    const r = await fetch(
+      `${base}/contacts/${encodeURIComponent(lid)}`,
+      { headers: { "Client-Token": creds.client_token! } },
+    );
+    if (r.ok) {
+      const j = await r.json();
+      const resolved = j?.phone ?? j?.contact?.phone ?? null;
+      if (resolved && /^\d+$/.test(String(resolved))) {
+        await supabase.from("lid_mapping").upsert({
+          instance_id: instanceId,
+          lid,
+          phone: String(resolved),
+          chat_name: chatName,
+          resolved_via: "zapi",
+        });
+        return { phone: String(resolved), via: "zapi" };
+      }
+    }
+  } catch (e) {
+    console.warn("ZapiProvider: @lid resolve fail", lid, e);
+  }
+
+  return { phone: null, via: "unresolved" };
 }
 
 // ─── ZapiProvider ───────────────────────────────────────────────────────────
@@ -218,8 +328,48 @@ export class ZapiProvider implements WaProvider {
     }
   }
 
-  fetchMedia(_creds: InstanceCreds, _ref: MediaRef): Promise<MediaPayload> {
-    throw new Error("not impl");
+  async fetchMedia(_creds: InstanceCreds, ref: MediaRef): Promise<MediaPayload> {
+    if (!ref.url) throw new Error("ZapiProvider.fetchMedia: ref.url is required for strategy=url");
+    const timeoutMs = DL_TIMEOUT_MS[ref.bucket] ?? 15000;
+    const bytes = await zapieFetchWithRetry(ref.url, timeoutMs);
+    return {
+      bytes,
+      mime: ref.mime ?? "application/octet-stream",
+      fileName: ref.fileName,
+    };
+  }
+
+  async resolveChatIds(
+    events: InboundEvent[],
+    creds: InstanceCreds,
+    deps: { supabase: any },
+  ): Promise<InboundEvent[]> {
+    const result: InboundEvent[] = [];
+    for (const ev of events) {
+      if (
+        (ev.kind === "message" || ev.kind === "reaction") &&
+        isLidJid(ev.chatId) &&
+        ev.fromMe === true &&
+        !("isGroup" in ev && (ev as { isGroup?: boolean }).isGroup)
+      ) {
+        const chatName = ev.kind === "message" ? ev.chatName : null;
+        const { phone } = await zapiResolveLidToPhone(
+          ev.chatId,
+          chatName ?? null,
+          creds.instance_id,
+          creds,
+          deps.supabase,
+        );
+        if (phone) {
+          result.push({ ...ev, chatId: phone });
+        } else {
+          result.push(ev);
+        }
+      } else {
+        result.push(ev);
+      }
+    }
+    return result;
   }
 
   buildAction(_creds: InstanceCreds, _action: WaAction, _params: unknown): BuiltRequest | null {
