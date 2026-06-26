@@ -128,14 +128,19 @@ async function runBatch() {
 
 async function transcribeFromStorage(media: any): Promise<string | null> {
   try {
-    // Baixa do Supabase Storage (preferência — URL persistente)
+    // Estratégia dual-provider:
+    //   - Evolution: original_url é NULL (mídia armazenada no Storage pelo webhook).
+    //     Download via Storage sempre funciona para esses casos.
+    //   - Z-API: original_url existe (CDN externo). Baixamos do Storage primeiro
+    //     (mais rápido e confiável); fallback para original_url se Storage falhar.
     const { data: blob, error: dlErr } = await supabase.storage
       .from(media.storage_bucket)
       .download(media.storage_path);
 
     let audioBlob: Blob;
     if (dlErr || !blob) {
-      // Fallback: tenta original_url (Backblaze CDN, pode expirar)
+      // Fallback: tenta original_url (Backblaze CDN, pode expirar).
+      // Para Evolution, original_url é null — retorna null (Storage deveria ter funcionado).
       if (!media.original_url) {
         console.warn("Sem URL disponível para mídia:", media.message_id);
         return null;
