@@ -1,4 +1,65 @@
-# Guia de migração — v1 → v2
+# Guia de migração
+
+## Upgrade para v3.0 (multi-provider)
+
+A **v3.0** introduz suporte a múltiplos provedores de WhatsApp — Z-API e Evolution API — selecionável por instância. Internamente, a tabela `zapi_instance` foi renomeada para `wa_instance` e `zapi_action_log` para `wa_action_log`; a Edge Function `zapi-proxy` virou `wa-proxy`. **Quem usa Z-API não precisa reconfigurar nada** — o upgrade é automático.
+
+### O que muda
+
+| | v2.x | v3.0 |
+|---|---|---|
+| Tabela de instâncias | `zapi_instance` | `wa_instance` (coluna `provider` = `'zapi'` ou `'evolution'`) |
+| Tabela de logs | `zapi_action_log` | `wa_action_log` |
+| Coluna de credencial | `token` | `auth_token` |
+| Edge Function de proxy | `zapi-proxy` | `wa-proxy` |
+| Provedores suportados | Z-API | Z-API + Evolution API (opt-in por instância) |
+
+### Passo a passo
+
+1. **Atualize o repositório:**
+   ```bash
+   git pull
+   ```
+
+2. **Aplique a migration `0031_provider_neutralization`:**
+   ```bash
+   supabase db push
+   ```
+   O que acontece: as tabelas são **renomeadas** (não dropadas — nenhum dado é perdido); a coluna `token` passa a se chamar `auth_token`; as colunas `provider` e `base_url` são adicionadas; todas as linhas existentes recebem `provider = 'zapi'` automaticamente. Views de compatibilidade `zapi_instance` e `zapi_action_log` são criadas para cobrir a janela de upgrade.
+
+3. **Faça o deploy das Edge Functions:**
+   ```bash
+   supabase functions deploy
+   ```
+   Isso inclui a nova `wa-proxy` (substituta da `zapi-proxy`), além das funções atualizadas (`send-message`, `process-webhook`, `wa-proxy`, `mcp-api`, etc.).
+
+4. **(Opcional) Remova a função antiga:**
+   ```bash
+   supabase functions delete zapi-proxy
+   ```
+   Não é obrigatório — a `zapi-proxy` ficará inativa de qualquer forma após o deploy, mas removê-la evita confusão.
+
+### Verificação
+
+Confirme que as instâncias existentes foram preservadas com o provedor correto:
+
+```sql
+SELECT provider, count(*) FROM wa_instance GROUP BY provider;
+-- Resultado esperado: uma linha com provider = 'zapi' e o número de instâncias que você tinha
+```
+
+Faça um smoke test via MCP: peça ao Claude para usar a tool `status` — ela deve retornar o estado da instância Z-API sem nenhuma reconfiguração.
+
+### Garantias
+
+- **Dados preservados:** a migration usa `ALTER TABLE … RENAME`, nunca `DROP`. Nenhuma mensagem, chat ou log é apagado.
+- **Z-API continua funcionando:** instâncias existentes recebem `provider = 'zapi'` automaticamente; nenhuma credencial precisa ser reinserida.
+- **Evolution API é opt-in:** para adicionar uma instância Evolution, basta criar uma nova linha em `wa_instance` com `provider = 'evolution'` e o `base_url` do seu servidor Evolution.
+- **Views de compatibilidade:** `zapi_instance` e `zapi_action_log` são shims de depreciação — cobrem integrações externas que ainda referenciem os nomes antigos durante o upgrade. Serão removidas numa versão futura.
+
+---
+
+## Upgrade de v1 → v2
 
 A **v2** troca o MCP **local (stdio)** por um **MCP remoto sobre HTTP** nas Edge Functions do Supabase, e dissolve as skills operacionais em **tools**. Quem rodava a v1 remove o cliente local, (re)provisiona o Supabase e reconecta o MCP no harness. **Nenhum dado de mensagem é perdido** — o banco é o mesmo.
 
