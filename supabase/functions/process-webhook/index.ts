@@ -126,7 +126,7 @@ Deno.serve(async (req) => {
   const { data: rawRow } = await supabase
     .from("webhook_events_raw")
     .insert({
-      event_type: payload.type ?? "unknown",
+      event_type: payload.type ?? payload.event ?? "unknown",
       payload,
       was_waiting: payload?.waitingMessage === true,
     })

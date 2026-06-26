@@ -18,7 +18,11 @@
 BEGIN;
 
 -- 1) Remover cron job de cleanup
-SELECT cron.unschedule('cleanup-presence-events');
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'cleanup-presence-events') THEN
+    PERFORM cron.unschedule('cleanup-presence-events');
+  END IF;
+END $$;
 
 -- 2) Drop tabela
 DROP TABLE IF EXISTS public.presence_events CASCADE;
