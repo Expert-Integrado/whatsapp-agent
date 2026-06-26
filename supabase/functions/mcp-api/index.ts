@@ -101,7 +101,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 let _instCache: any[] | null = null;
 async function loadInstances() {
   if (_instCache) return _instCache;
-  const { data } = await supabase.from("zapi_instance").select("instance_id, alias, phone_connected, is_default, is_active");
+  const { data } = await supabase.from("wa_instance").select("instance_id, alias, phone_connected, is_default, is_active, provider");
   _instCache = data || [];
   return _instCache;
 }
@@ -411,7 +411,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         for (const inst of instances) {
           let zapiData: any;
           try {
-            const { data } = await callEdge("zapi-proxy", { action: "status", method: "GET", agent_name: "mcp-api", instance: inst.alias ?? inst.instance_id });
+            const { data } = await callEdge("wa-proxy", { action: "status", method: "GET", agent_name: "mcp-api", instance: inst.alias ?? inst.instance_id });
             zapiData = data?.result;
           } catch (e) { zapiData = { error: String((e as Error)?.message ?? e) }; }
           const { count: total } = await supabase.from("messages").select("*", { count: "exact", head: true }).eq("instance_id", inst.instance_id);
@@ -419,7 +419,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           perInstance.push({
             instance: inst.alias ?? inst.instance_id,
             phone_connected: inst.phone_connected,
-            connected: zapiData?.connected || zapiData?.smartphoneConnected || false,
+            connected: zapiData?.connected ?? false,
             webhook_active: inst.is_active,
             zapi: zapiData,
             stats: { total_messages: total, messages_last_24h: today },
@@ -777,7 +777,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const { data: msg, error } = await supabase.from("messages").select("provider_msg_id,chat_id,instance_id").eq("id", message_id).single();
         if (error || !msg) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
         const phone = String(msg.chat_id).replace(/@.*$/, "");
-        const { status, data } = await callEdge("zapi-proxy", { action: "send-reaction", params: { phone, messageId: msg.provider_msg_id, reaction: emoji }, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
+        const { status, data } = await callEdge("wa-proxy", { action: "send-reaction", params: { phone, messageId: msg.provider_msg_id, reaction: emoji }, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         return json({ ok: true, reacted: true, emoji, result: data?.result });
       }
@@ -792,7 +792,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const ageMs = Date.now() - (msg.message_ts ? new Date(msg.message_ts).getTime() : 0);
         if (ageMs > 15 * 60 * 1000) return json({ error: `Janela de 15min expirada. Use delete + send.` }, 400);
         const phone = String(msg.chat_id).replace(/@.*$/, "");
-        const { status, data } = await callEdge("zapi-proxy", { action: "send-text", params: { phone, message: new_content, editMessageId: msg.provider_msg_id }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
+        const { status, data } = await callEdge("wa-proxy", { action: "send-text", params: { phone, message: new_content, editMessageId: msg.provider_msg_id }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         await supabase.from("messages").update({ content: new_content, is_edited: true }).eq("id", message_id);
         return json({ ok: true, edited: true, message_id, new_content });
@@ -804,7 +804,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const { data: msg, error } = await supabase.from("messages").select("provider_msg_id,chat_id,from_me,instance_id").eq("id", message_id).single();
         if (error || !msg) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
         const phone = String(msg.chat_id).replace(/@.*$/, "");
-        const { status, data } = await callEdge("zapi-proxy", { action: "delete-message", params: { phone, messageId: msg.provider_msg_id, owner: !!msg.from_me }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
+        const { status, data } = await callEdge("wa-proxy", { action: "delete-message", params: { phone, messageId: msg.provider_msg_id, owner: !!msg.from_me }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         await supabase.from("messages").update({ is_deleted: true }).eq("id", message_id);
         return json({ ok: true, deleted: true, message_id });
@@ -814,7 +814,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const ZAPI_SEND_ACTIONS = new Set(["send-poll", "forward-message", "forward", "edit-message", "send-text", "send-message"]);
         const { action: zaction, params: zparams = {}, confirmed = false, instance } = params;
         if (ZAPI_SEND_ACTIONS.has(zaction) && !confirmed) return json({ blocked: true, needs_confirmation: true, action: zaction, params: zparams, instruction: `A action "${zaction}" envia conteudo. Mostre ao usuario e reenvie com confirmed:true apos confirmacao.` });
-        const { status, data } = await callEdge("zapi-proxy", { action: zaction, params: zparams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance });
+        const { status, data } = await callEdge("wa-proxy", { action: zaction, params: zparams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}`, detail: data }, status);
         return json({ ok: true, action: zaction, result: data?.result });
       }
@@ -851,17 +851,15 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const instRows = await loadInstances();
         const targetInst = instance ? await resolveInstanceKey(instance) : (instRows.find((i: any) => i.is_default)?.instance_id ?? instRows[0]?.instance_id);
         if (instance && !targetInst) return json({ error: `Instancia "${instance}" nao encontrada.` }, 400);
-        const { status, data: zr } = await callEdge("zapi-proxy", { action: "chats", method: "GET", agent_name: "mcp-api", instance: targetInst });
+        const { status, data: zr } = await callEdge("wa-proxy", { action: "chats", method: "GET", agent_name: "mcp-api", instance: targetInst });
         if (status >= 400) return json({ ok: false, error: zr?.error || `zapi ${status}` }, status);
-        const raw = zr?.result;
-        const allChats = Array.isArray(raw) ? raw : (raw?.value || raw?.chats || raw?.data || []);
-        const groups = allChats.filter((c: any) => c.isGroup === true || c.is_group === true || c.type === "group");
-        if (!groups.length) return json({ ok: true, message: "Nenhum grupo na Z-API.", total_chats: allChats.length, total_groups: 0 });
+        const result: any[] = Array.isArray(zr?.result) ? zr.result : [];
+        if (!result.length) return json({ ok: true, message: "Nenhum grupo encontrado.", total_groups: 0 });
         const updated: any[] = [], not_found: any[] = [];
-        for (const group of groups) {
-          const rawPhone = String(group.phone || group.id || group.chatId || "");
+        for (const g of result) {
+          const rawPhone = String(g.chatId || "");
           const phone = rawPhone.replace(/[^0-9]/g, "");
-          const name = group.name || group.chatName || group.subject || group.groupName || null;
+          const name = g.name || null;
           if (!phone || !name) continue;
           if (dry_run) { updated.push({ phone, name, dry_run: true }); continue; }
           let matched = false;
@@ -873,7 +871,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           }
           if (!matched) not_found.push({ phone, name });
         }
-        return json({ ok: true, total_groups_in_zapi: groups.length, updated_count: updated.length, not_found_count: not_found.length, updated, ...(not_found.length && { not_found }), dry_run });
+        return json({ ok: true, total_groups: result.length, updated_count: updated.length, not_found_count: not_found.length, updated, ...(not_found.length && { not_found }), dry_run });
       }
 
       case "get_voice_guide": {
