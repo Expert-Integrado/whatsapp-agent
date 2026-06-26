@@ -2,7 +2,7 @@
 //
 // Decisao revisada apos Conselho (11/05/2026): edges Supabase sao stateless,
 // contador em memoria nao funciona entre invocacoes. Usa tabela existente
-// (messages para DESTRUCTIVE de envio, zapi_action_log para WRITE/READ).
+// (messages para DESTRUCTIVE de envio, wa_action_log para WRITE/READ).
 
 // Alinhado ao specifier npm: usado pelas edges (zapi-proxy/send-voice) — usar
 // esm.sh aqui criava duas identidades de tipo SupabaseClient incompatíveis.
@@ -86,7 +86,7 @@ export async function checkSendRateLimit(
 
 /**
  * Rate limit para WRITE/READ actions (mark-read, send-reaction, status, chats, etc).
- * Usa zapi_action_log como contador.
+ * Usa wa_action_log como contador.
  */
 export async function checkActionRateLimit(
   supabase: SupabaseClient,
@@ -96,7 +96,7 @@ export async function checkActionRateLimit(
 ): Promise<RateLimitResult> {
   const oneMinAgo = new Date(Date.now() - 60_000).toISOString();
   const { data } = await supabase
-    .from("zapi_action_log")
+    .from("wa_action_log")
     .select("id")
     .eq("instance_id", instanceId)
     .eq("category", category)
