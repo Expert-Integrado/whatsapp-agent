@@ -1,5 +1,5 @@
 import { registerProvider, type WaProvider } from "./provider.ts";
-import type { InstanceCreds, OutboundMessage, BuiltRequest, SendResult, MsgType, InboundEvent, SendStatus } from "./types.ts";
+import type { InstanceCreds, OutboundMessage, BuiltRequest, SendResult, MsgType, InboundEvent, SendStatus, MediaRef, MediaPayload } from "./types.ts";
 import { digitsFromJid, isGroupJid } from "./jid.ts";
 
 const MEDIA_TYPE: Partial<Record<MsgType, "image"|"video"|"document">> = {
@@ -253,8 +253,35 @@ export class EvolutionProvider implements WaProvider {
 
     return [];
   }
-  fetchMedia(creds: InstanceCreds, ref: any): Promise<any> {
-    throw new Error("not impl");
+  async fetchMedia(creds: InstanceCreds, ref: MediaRef): Promise<MediaPayload> {
+    const url = this.u(creds, "chat/getBase64FromMediaMessage");
+    const headers = this.h(creds);
+    const body = JSON.stringify({ message: { key: { id: ref.providerMsgId } }, convertToMp4: false });
+    const TIMEOUT_MS = 30000;
+    const MAX_ATTEMPTS = 3;
+    let lastErr: unknown;
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers,
+          body,
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        if (!res.ok) throw new Error(`fetchMedia HTTP ${res.status}`);
+        const json = await res.json();
+        const bytes = Uint8Array.from(atob(json.base64 as string), (c) => c.charCodeAt(0));
+        return {
+          bytes,
+          mime: (json.mimetype as string | null) ?? ref.mime ?? "application/octet-stream",
+          fileName: (json.fileName as string | undefined) ?? ref.fileName,
+        };
+      } catch (e) {
+        lastErr = e;
+        if (i < MAX_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+    throw lastErr;
   }
   buildAction(creds: InstanceCreds, action: any, params: any): any {
     throw new Error("not impl");

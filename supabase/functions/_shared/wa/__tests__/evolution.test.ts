@@ -357,3 +357,110 @@ Deno.test("evo.normalizeInbound: messages.update SERVER_ACK → status sent", as
     assertEquals(evs[0].status, "sent");
   }
 });
+
+// ── fetchMedia ───────────────────────────────────────────────────────────────
+
+Deno.test("evo.fetchMedia decodifica base64 do getBase64FromMediaMessage", async () => {
+  const orig = globalThis.fetch;
+  const b64 = btoa("abc");
+  globalThis.fetch = () =>
+    Promise.resolve(
+      new Response(JSON.stringify({ base64: b64, mimetype: "audio/ogg", fileName: "a.ogg" }), { status: 200 }),
+    );
+  try {
+    const out = await e.fetchMedia(creds, {
+      strategy: "fetch",
+      providerMsgId: "MID",
+      mime: null,
+      bucket: "whatsapp-audio",
+      ext: "ogg",
+    });
+    assertEquals(new TextDecoder().decode(out.bytes), "abc");
+    assertEquals(out.mime, "audio/ogg");
+    assertEquals(out.fileName, "a.ogg");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+Deno.test("evo.fetchMedia envia POST correto para getBase64FromMediaMessage", async () => {
+  const orig = globalThis.fetch;
+  let capturedUrl = "";
+  let capturedInit: RequestInit = {};
+  const b64 = btoa("xyz");
+  globalThis.fetch = (url: string | URL | Request, init?: RequestInit) => {
+    capturedUrl = String(url);
+    capturedInit = init ?? {};
+    return Promise.resolve(
+      new Response(JSON.stringify({ base64: b64, mimetype: "image/jpeg", fileName: "img.jpg" }), { status: 200 }),
+    );
+  };
+  try {
+    await e.fetchMedia(creds, {
+      strategy: "fetch",
+      providerMsgId: "MSGID123",
+      mime: "image/jpeg",
+      bucket: "whatsapp-images",
+      ext: "jpg",
+    });
+    assertEquals(capturedUrl, "https://evo.x/chat/getBase64FromMediaMessage/you_casa");
+    assertEquals((capturedInit.headers as Record<string, string>)["apikey"], "APIKEY");
+    assertEquals(JSON.parse(capturedInit.body as string), {
+      message: { key: { id: "MSGID123" } },
+      convertToMp4: false,
+    });
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+Deno.test("evo.fetchMedia usa mime/fileName de ref quando resposta não traz", async () => {
+  const orig = globalThis.fetch;
+  const b64 = btoa("fallback");
+  globalThis.fetch = () =>
+    Promise.resolve(
+      new Response(JSON.stringify({ base64: b64 }), { status: 200 }),
+    );
+  try {
+    const out = await e.fetchMedia(creds, {
+      strategy: "fetch",
+      providerMsgId: "MID2",
+      mime: "video/mp4",
+      bucket: "whatsapp-video",
+      ext: "mp4",
+      fileName: "clip.mp4",
+    });
+    assertEquals(out.mime, "video/mp4");
+    assertEquals(out.fileName, "clip.mp4");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+Deno.test("evo.fetchMedia retenta em falha e sucede na segunda tentativa", async () => {
+  const orig = globalThis.fetch;
+  let attempts = 0;
+  const b64 = btoa("retry");
+  globalThis.fetch = () => {
+    attempts++;
+    if (attempts < 2) {
+      return Promise.resolve(new Response("error", { status: 500 }));
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify({ base64: b64, mimetype: "audio/ogg" }), { status: 200 }),
+    );
+  };
+  try {
+    const out = await e.fetchMedia(creds, {
+      strategy: "fetch",
+      providerMsgId: "MID3",
+      mime: null,
+      bucket: "whatsapp-audio",
+      ext: "ogg",
+    });
+    assertEquals(new TextDecoder().decode(out.bytes), "retry");
+    assertEquals(attempts, 2);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
