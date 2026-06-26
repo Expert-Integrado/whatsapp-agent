@@ -340,6 +340,21 @@ Deno.test("zapi.buildAction get-contact-info vira GET /contacts/{phone}", () => 
   assertEquals(r!.body, undefined);
 });
 
+Deno.test("zapi.buildAction status usa GET sem body (RED: atualmente retorna POST)", () => {
+  const r = z.buildAction(creds, "status", {});
+  assertEquals(r!.method, "GET");
+  assertEquals(r!.url.endsWith("/status"), true);
+  assertEquals(r!.body, undefined);
+});
+
+Deno.test("zapi.buildAction chats usa GET sem body", () => {
+  const r = z.buildAction(creds, "chats", {});
+  assertEquals(r!.method, "GET");
+  assertEquals(r!.url.endsWith("/chats"), true);
+  assertEquals(r!.body, undefined);
+});
+
+
 Deno.test("zapi.parseConnection lê connected/smartphoneConnected", () => {
   assertEquals(z.parseConnection({ connected: true }).connected, true);
   assertEquals(z.parseConnection({ smartphoneConnected: true }).connected, true);
