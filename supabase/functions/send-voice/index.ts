@@ -1,20 +1,21 @@
-// send-voice — gera áudio TTS via ElevenLabs (OGG/Opus) e envia via Z-API.
+// send-voice — gera áudio TTS via ElevenLabs (OGG/Opus) e envia via provider WA.
 //
 // Padrão alinhado com 8.1 (zapi-proxy):
 //   - confirmed=true obrigatório (gate destrutivo — envio em nome do user)
-//   - agent_request_id pra idempotency (cache 24h em zapi_action_log)
-//   - audit log centralizado em zapi_action_log com category=destructive
+//   - agent_request_id pra idempotency (cache 24h em wa_action_log)
+//   - audit log centralizado em wa_action_log com category=destructive
 //   - rate limit reusa lógica do send-message (por chat + global)
-//   - timeout 30s pra ElevenLabs + 15s pra Z-API
+//   - timeout 30s pra ElevenLabs + 15s pra provider WA
 //
 // ElevenLabs output_format=opus_48000_32 entrega OGG/Opus mono 48kHz direto
-// (sem ffmpeg server-side). Z-API com waveform=true exibe onda real em PTT.
+// (sem ffmpeg server-side). Provider WA com type=ptt exibe onda real em PTT.
 //
 // Skill `voz` no claude-code VPS contem catalog de perfis (voice_id + settings)
 // — esta function NAO conhece perfis, recebe parametros explicitos.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { checkSendRateLimit } from "../_shared/rate-limit.ts";
+import { getProvider, type InstanceCreds } from "../_shared/wa/index.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -55,7 +56,7 @@ function sanitizeAgentName(name: unknown): string {
 async function findCachedResponse(agentRequestId: string) {
   const oneDayAgo = new Date(Date.now() - 86_400_000).toISOString();
   const { data } = await supabase
-    .from("zapi_action_log")
+    .from("wa_action_log")
     .select("result_status, result_body, error, action")
     .eq("agent_request_id", agentRequestId)
     .gte("called_at", oneDayAgo)
@@ -140,11 +141,20 @@ Deno.serve(async (req) => {
   if (instanceKey !== undefined && (typeof instanceKey !== "string" || !/^[A-Za-z0-9_-]+$/.test(instanceKey))) {
     return json({ error: "instance invalido" }, 400);
   }
-  const instSel = supabase.from("zapi_instance").select("instance_id, token, client_token");
-  const { data: instance } = (typeof instanceKey === "string" && instanceKey.length > 0)
+  const instSel = supabase.from("wa_instance").select("provider, instance_id, base_url, auth_token, client_token, alias");
+  const { data: instanceRow } = (typeof instanceKey === "string" && instanceKey.length > 0)
     ? await instSel.or(`alias.eq.${instanceKey},instance_id.eq.${instanceKey}`).limit(1).maybeSingle()
     : await instSel.eq("is_default", true).maybeSingle();
-  if (!instance) return json({ error: "instancia Z-API nao encontrada" }, 500);
+  if (!instanceRow) return json({ error: "instancia WA nao encontrada" }, 500);
+  const creds: InstanceCreds = {
+    provider: instanceRow.provider,
+    instance_id: instanceRow.instance_id,
+    base_url: instanceRow.base_url ?? null,
+    auth_token: instanceRow.auth_token,
+    client_token: instanceRow.client_token ?? null,
+    alias: instanceRow.alias ?? null,
+  };
+  const instance = creds;
 
   // ─── 6. Resolve chat → phone (escopado por instância) + verifica que existe
   const { data: chat } = await supabase
@@ -171,7 +181,7 @@ Deno.serve(async (req) => {
 
   // ─── 8. Audit log inicial
   const { data: logRow } = await supabase
-    .from("zapi_action_log")
+    .from("wa_action_log")
     .insert({
       agent_request_id,
       action: "send-voice",
@@ -205,7 +215,7 @@ Deno.serve(async (req) => {
     .single();
 
   if (insertErr) {
-    await supabase.from("zapi_action_log").update({
+    await supabase.from("wa_action_log").update({
       result_status: 500,
       error: `insert messages: ${insertErr.message}`.slice(0, 500),
       duration_ms: Date.now() - startTs,
@@ -256,25 +266,13 @@ Deno.serve(async (req) => {
       .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
     if (signErr || !signed?.signedUrl) throw new Error(`Signed URL: ${signErr?.message ?? "no url"}`);
 
-    // ─── 13. Z-API send-audio com waveform=true (PTT)
-    const zapiAbort = AbortSignal.timeout(ZAPI_TIMEOUT_MS);
-    const zapiBase = `https://api.z-api.io/instances/${instance.instance_id}/token/${instance.token}`;
-    const zapiRes = await fetch(`${zapiBase}/send-audio`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Client-Token": instance.client_token },
-      body: JSON.stringify({
-        phone,
-        audio: signed.signedUrl,
-        waveform: true,
-      }),
-      signal: zapiAbort,
-    });
-    if (!zapiRes.ok) {
-      const errBody = await zapiRes.text();
-      throw new Error(`Z-API send-audio ${zapiRes.status}: ${errBody.slice(0, 200)}`);
-    }
-    const zapiResult = await zapiRes.json();
-    const realId = zapiResult.messageId ?? zapiResult.id ?? `sent-${tempId}`;
+    // ─── 13. Provider-agnostic send PTT
+    const provider = getProvider(creds.provider);
+    const built = await provider.buildSend(creds, { chatId: chat_id, phone, type: "ptt", media: { url: signed.signedUrl } });
+    const sendAbort = AbortSignal.timeout(ZAPI_TIMEOUT_MS);
+    const res = await fetch(built.url, { method: built.method, headers: built.headers, body: built.body, signal: sendAbort });
+    if (!res.ok) throw new Error(`${creds.provider} audio ${res.status}: ${(await res.text()).slice(0,200)}`);
+    const realId = provider.parseSendResult(await res.json()).providerMsgId || `sent-${tempId}`;
 
     // ─── 14. Update messages com provider_msg_id real
     await supabase
@@ -293,7 +291,7 @@ Deno.serve(async (req) => {
 
     // ─── 15. Audit log final
     await supabase
-      .from("zapi_action_log")
+      .from("wa_action_log")
       .update({
         result_status: 200,
         result_body: resultBody as any,
@@ -309,7 +307,7 @@ Deno.serve(async (req) => {
       send_status: "failed",
       send_error: errorText,
     }).eq("id", msg!.id);
-    await supabase.from("zapi_action_log").update({
+    await supabase.from("wa_action_log").update({
       result_status: 500,
       error: errorText,
       duration_ms: durationMs,
