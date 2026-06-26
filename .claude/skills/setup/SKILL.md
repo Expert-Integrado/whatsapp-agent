@@ -150,7 +150,7 @@ Apos o `db push`, insira a linha da instancia na tabela `wa_instance`. Escolha o
 SQL="INSERT INTO wa_instance (provider, instance_id, auth_token, client_token, webhook_url, is_default, is_active)
      VALUES ('zapi', '<ZAPI_INSTANCE_ID>', '<ZAPI_TOKEN>', '<ZAPI_CLIENT_TOKEN>',
              'https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/process-webhook',
-             true, true);"
+             true, true);" # alias: coluna opcional para rótulo amigável
 curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
   -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
   -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"
@@ -164,7 +164,7 @@ curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/dat
 SQL="INSERT INTO wa_instance (provider, instance_id, base_url, auth_token, webhook_url, is_default, is_active)
      VALUES ('evolution', '<EVO_INSTANCE>', '<EVO_BASE_URL>', '<EVO_APIKEY>',
              'https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/process-webhook',
-             true, true);"
+             true, true);" # alias: coluna opcional para rótulo amigável
 curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
   -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
   -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"
@@ -256,7 +256,7 @@ Em seguida, registre o webhook no servidor Evolution:
 
 ```bash
 HOOK="https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/process-webhook"
-EVO_BASE="https://<EVO_BASE_URL>"   # sem barra final
+EVO_BASE="$EVO_BASE_URL"   # sem barra final
 EVO_INSTANCE="<EVO_INSTANCE>"
 EVO_APIKEY="<EVO_APIKEY>"
 WEBHOOK_SECRET="<WEBHOOK_SECRET>"   # mesmo valor de webhook_token em wa_instance
