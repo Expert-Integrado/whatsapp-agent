@@ -14,6 +14,10 @@ A **v3.0** introduz suporte a múltiplos provedores de WhatsApp — Z-API e Evol
 | Edge Function de proxy | `zapi-proxy` | `wa-proxy` |
 | Provedores suportados | Z-API | Z-API + Evolution API (opt-in por instância) |
 
+### Nota — Comportamento de webhooks
+
+Com `WEBHOOK_REQUIRE_AUTH=true` (recomendado), webhooks de instâncias não registradas são rejeitados com 401. Com a auth desabilitada, um webhook de instância desconhecida agora retorna 500 (o evento bruto ainda é gravado em `webhook_events_raw`) — diferente do comportamento legado que persistia sob uma instância `'unknown'`. Registre toda instância em `wa_instance` antes de apontar o webhook.
+
 ### Passo a passo
 
 1. **Atualize o repositório:**

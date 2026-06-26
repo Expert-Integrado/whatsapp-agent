@@ -409,19 +409,19 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const instances = await loadInstances();
         const perInstance: any[] = [];
         for (const inst of instances) {
-          let zapiData: any;
+          let waData: any;
           try {
             const { data } = await callEdge("wa-proxy", { action: "status", method: "GET", agent_name: "mcp-api", instance: inst.alias ?? inst.instance_id });
-            zapiData = data?.result;
-          } catch (e) { zapiData = { error: String((e as Error)?.message ?? e) }; }
+            waData = data?.result;
+          } catch (e) { waData = { error: String((e as Error)?.message ?? e) }; }
           const { count: total } = await supabase.from("messages").select("*", { count: "exact", head: true }).eq("instance_id", inst.instance_id);
           const { count: today } = await supabase.from("messages").select("*", { count: "exact", head: true }).eq("instance_id", inst.instance_id).gte("created_at", dayAgo);
           perInstance.push({
             instance: inst.alias ?? inst.instance_id,
             phone_connected: inst.phone_connected,
-            connected: zapiData?.connected ?? false,
+            connected: waData?.connected ?? false,
             webhook_active: inst.is_active,
-            zapi: zapiData,
+            provider_status: waData,
             stats: { total_messages: total, messages_last_24h: today },
           });
         }
