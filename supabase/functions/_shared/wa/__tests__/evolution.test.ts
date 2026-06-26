@@ -1,6 +1,7 @@
 import { assertEquals } from "jsr:@std/assert";
 import { EvolutionProvider } from "../evolution.ts";
 import type { InstanceCreds } from "../types.ts";
+import { getProvider } from "../index.ts";
 import upsertText from "./fixtures/evo-messages-upsert-text.json" with { type: "json" };
 import upsertImage from "./fixtures/evo-messages-upsert-image.json" with { type: "json" };
 import statusPayload from "./fixtures/evo-status.json" with { type: "json" };
@@ -463,4 +464,187 @@ Deno.test("evo.fetchMedia retenta em falha e sucede na segunda tentativa", async
   } finally {
     globalThis.fetch = orig;
   }
+});
+
+// ── buildAction ──────────────────────────────────────────────────────────────
+
+Deno.test("evo.buildAction send-reaction monta key+reaction", () => {
+  const r = e.buildAction(creds, "send-reaction", { phone: "5511", messageId: "M", reaction: "✅", fromMe: false });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/message/sendReaction/you_casa"), true);
+  assertEquals(r!.method, "POST");
+  assertEquals(r!.headers["apikey"], "APIKEY");
+  assertEquals(JSON.parse(r!.body!), { key: { remoteJid: "5511@s.whatsapp.net", fromMe: false, id: "M" }, reaction: "✅" });
+});
+
+Deno.test("evo.buildAction send-text sem editMessageId → POST message/sendText", () => {
+  const r = e.buildAction(creds, "send-text", { phone: "5511", message: "oi" });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/message/sendText/you_casa"), true);
+  assertEquals(r!.method, "POST");
+  assertEquals(JSON.parse(r!.body!), { number: "5511", text: "oi" });
+});
+
+Deno.test("evo.buildAction send-text com editMessageId → POST chat/updateMessage", () => {
+  const r = e.buildAction(creds, "send-text", { phone: "5511", message: "edit", editMessageId: "ORIG" });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/chat/updateMessage/you_casa"), true);
+  assertEquals(r!.method, "POST");
+  assertEquals(JSON.parse(r!.body!), {
+    number: "5511",
+    key: { remoteJid: "5511@s.whatsapp.net", fromMe: true, id: "ORIG" },
+    text: "edit",
+  });
+});
+
+Deno.test("evo.buildAction delete-message → DELETE chat/deleteMessageForEveryone", () => {
+  const r = e.buildAction(creds, "delete-message", { phone: "5511", messageId: "DEL", owner: true });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/chat/deleteMessageForEveryone/you_casa"), true);
+  assertEquals(r!.method, "DELETE");
+  assertEquals(JSON.parse(r!.body!), { id: "DEL", remoteJid: "5511@s.whatsapp.net", fromMe: true });
+});
+
+Deno.test("evo.buildAction delete-message com participant → inclui participant", () => {
+  const r = e.buildAction(creds, "delete-message", { phone: "5511group@g.us", messageId: "DEL", owner: false, participant: "5511999@s.whatsapp.net" });
+  assertEquals(r !== null, true);
+  const body = JSON.parse(r!.body!);
+  assertEquals(body.participant, "5511999@s.whatsapp.net");
+  assertEquals(body.remoteJid, "5511group@g.us"); // group jid kept as-is
+});
+
+Deno.test("evo.buildAction block-contact → POST message/updateBlockStatus", () => {
+  const r = e.buildAction(creds, "block-contact", { phone: "5511", action: "block" });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/message/updateBlockStatus/you_casa"), true);
+  assertEquals(JSON.parse(r!.body!), { number: "5511", status: "block" });
+});
+
+Deno.test("evo.buildAction read-message → POST chat/markMessageAsRead", () => {
+  const r = e.buildAction(creds, "read-message", { phone: "5511", messageId: "READ1" });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/chat/markMessageAsRead/you_casa"), true);
+  assertEquals(JSON.parse(r!.body!), {
+    readMessages: [{ remoteJid: "5511@s.whatsapp.net", fromMe: false, id: "READ1" }],
+  });
+});
+
+Deno.test("evo.buildAction read-chat → POST chat/markMessageAsRead (mesmo endpoint)", () => {
+  const r = e.buildAction(creds, "read-chat", { phone: "5511", messageId: "READ2" });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/chat/markMessageAsRead/you_casa"), true);
+});
+
+Deno.test("evo.buildAction create-group → POST group/create", () => {
+  const r = e.buildAction(creds, "create-group", { subject: "Turma A", participants: ["5511@s.whatsapp.net"] });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/group/create/you_casa"), true);
+  assertEquals(JSON.parse(r!.body!), { subject: "Turma A", participants: ["5511@s.whatsapp.net"] });
+});
+
+Deno.test("evo.buildAction add-participant → POST group/updateParticipant action=add", () => {
+  const r = e.buildAction(creds, "add-participant", { phone: "5511group@g.us", participants: ["5511@s.whatsapp.net"] });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.includes("/group/updateParticipant/you_casa"), true);
+  assertEquals(r!.url.includes("groupJid=5511group%40g.us") || r!.url.includes("groupJid=5511group@g.us"), true);
+  assertEquals(JSON.parse(r!.body!), { action: "add", participants: ["5511@s.whatsapp.net"] });
+});
+
+Deno.test("evo.buildAction add-admin → promote", () => {
+  const r = e.buildAction(creds, "add-admin", { phone: "5511group@g.us", participants: ["5511@s.whatsapp.net"] });
+  assertEquals(r !== null, true);
+  assertEquals(JSON.parse(r!.body!).action, "promote");
+});
+
+Deno.test("evo.buildAction remove-admin → demote", () => {
+  const r = e.buildAction(creds, "remove-admin", { phone: "5511group@g.us", participants: ["5511@s.whatsapp.net"] });
+  assertEquals(r !== null, true);
+  assertEquals(JSON.parse(r!.body!).action, "demote");
+});
+
+Deno.test("evo.buildAction status → GET instance/connectionState", () => {
+  const r = e.buildAction(creds, "status", {});
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/instance/connectionState/you_casa"), true);
+  assertEquals(r!.method, "GET");
+  assertEquals(r!.body, undefined);
+});
+
+Deno.test("evo.buildAction chats → GET group/fetchAllGroups", () => {
+  const r = e.buildAction(creds, "chats", {});
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.includes("/group/fetchAllGroups/you_casa"), true);
+  assertEquals(r!.method, "GET");
+});
+
+Deno.test("evo.buildAction get-contact-info → null (sem equivalente)", () => {
+  const r = e.buildAction(creds, "get-contact-info", { phone: "5511" });
+  assertEquals(r, null);
+});
+
+Deno.test("evo.buildAction send-poll → null (sem equivalente)", () => {
+  const r = e.buildAction(creds, "send-poll", { phone: "5511" });
+  assertEquals(r, null);
+});
+
+Deno.test("evo.buildAction forward → null (sem equivalente)", () => {
+  const r = e.buildAction(creds, "forward", { phone: "5511" });
+  assertEquals(r, null);
+});
+
+// ── parseConnection ───────────────────────────────────────────────────────────
+
+Deno.test("evo.parseConnection lê instance.state=open → connected true", () => {
+  assertEquals(e.parseConnection({ instance: { state: "open" } }).connected, true);
+});
+
+Deno.test("evo.parseConnection lê instance.state=close → connected false", () => {
+  assertEquals(e.parseConnection({ instance: { state: "close" } }).connected, false);
+});
+
+Deno.test("evo.parseConnection lê state=open (raiz) → connected true", () => {
+  assertEquals(e.parseConnection({ state: "open" }).connected, true);
+});
+
+Deno.test("evo.parseConnection json vazio → connected false", () => {
+  assertEquals(e.parseConnection({}).connected, false);
+  assertEquals(e.parseConnection(null).connected, false);
+});
+
+// ── fetchGroups ───────────────────────────────────────────────────────────────
+
+Deno.test("evo.fetchGroups mapeia array de grupos para NeutralGroup", async () => {
+  const orig = globalThis.fetch;
+  const fakeGroups = [
+    { id: "1111@g.us", subject: "Grupo A", size: 5 },
+    { id: "2222@g.us", subject: "Grupo B", participants: [1, 2, 3] },
+    { id: "3333@g.us" }, // sem subject nem size
+  ];
+  let capturedUrl = "";
+  let capturedHeaders: Record<string, string> = {};
+  globalThis.fetch = (url: string | URL | Request, init?: RequestInit) => {
+    capturedUrl = String(url);
+    capturedHeaders = (init?.headers ?? {}) as Record<string, string>;
+    return Promise.resolve(new Response(JSON.stringify(fakeGroups), { status: 200 }));
+  };
+  try {
+    const groups = await e.fetchGroups(creds);
+    assertEquals(groups.length, 3);
+    assertEquals(groups[0], { chatId: "1111@g.us", name: "Grupo A", participantCount: 5 });
+    assertEquals(groups[1], { chatId: "2222@g.us", name: "Grupo B", participantCount: 3 });
+    assertEquals(groups[2].chatId, "3333@g.us");
+    assertEquals(groups[2].name, null);
+    // URL e header corretos
+    assertEquals(capturedUrl.includes("/group/fetchAllGroups/you_casa"), true);
+    assertEquals(capturedUrl.includes("getParticipants=false"), true);
+    assertEquals(capturedHeaders["apikey"], "APIKEY");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+// ── index.ts wire-up ──────────────────────────────────────────────────────────
+
+Deno.test("index.ts: getProvider('evolution').id === 'evolution'", () => {
+  assertEquals(getProvider("evolution").id, "evolution");
 });

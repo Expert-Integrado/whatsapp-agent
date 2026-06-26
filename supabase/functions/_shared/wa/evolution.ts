@@ -1,5 +1,5 @@
 import { registerProvider, type WaProvider } from "./provider.ts";
-import type { InstanceCreds, OutboundMessage, BuiltRequest, SendResult, MsgType, InboundEvent, SendStatus, MediaRef, MediaPayload } from "./types.ts";
+import type { InstanceCreds, OutboundMessage, BuiltRequest, SendResult, MsgType, InboundEvent, SendStatus, MediaRef, MediaPayload, NeutralGroup, WaAction } from "./types.ts";
 import { digitsFromJid, isGroupJid } from "./jid.ts";
 
 const MEDIA_TYPE: Partial<Record<MsgType, "image"|"video"|"document">> = {
@@ -283,14 +283,155 @@ export class EvolutionProvider implements WaProvider {
     }
     throw lastErr;
   }
-  buildAction(creds: InstanceCreds, action: any, params: any): any {
-    throw new Error("not impl");
+  buildAction(creds: InstanceCreds, action: WaAction, params: Record<string, any>): BuiltRequest | null {
+    const headers = this.h(creds);
+
+    /** Convert a phone param to a WhatsApp JID. Group JIDs (@g.us) are kept as-is. */
+    const toJid = (phone: string): string => {
+      if (phone.endsWith("@g.us")) return phone;
+      // Strip non-digits and append @s.whatsapp.net
+      const digits = phone.replace(/\D/g, "");
+      return `${digits}@s.whatsapp.net`;
+    };
+
+    switch (action) {
+      case "send-reaction": {
+        const jid = toJid(params.phone ?? "");
+        return {
+          url: this.u(creds, "message/sendReaction"),
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            key: { remoteJid: jid, fromMe: !!params.fromMe, id: params.messageId },
+            reaction: params.reaction,
+          }),
+        };
+      }
+
+      case "send-text": {
+        if (params.editMessageId) {
+          const jid = toJid(params.phone ?? "");
+          return {
+            url: this.u(creds, "chat/updateMessage"),
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              number: params.phone,
+              key: { remoteJid: jid, fromMe: true, id: params.editMessageId },
+              text: params.message,
+            }),
+          };
+        }
+        return {
+          url: this.u(creds, "message/sendText"),
+          method: "POST",
+          headers,
+          body: JSON.stringify({ number: params.phone, text: params.message }),
+        };
+      }
+
+      case "delete-message": {
+        const jid = toJid(params.phone ?? "");
+        const body: Record<string, unknown> = {
+          id: params.messageId,
+          remoteJid: jid,
+          fromMe: !!params.owner,
+        };
+        if (params.participant) body.participant = params.participant;
+        return {
+          url: this.u(creds, "chat/deleteMessageForEveryone"),
+          method: "DELETE",
+          headers,
+          body: JSON.stringify(body),
+        };
+      }
+
+      case "block-contact":
+        return {
+          url: this.u(creds, "message/updateBlockStatus"),
+          method: "POST",
+          headers,
+          body: JSON.stringify({ number: params.phone, status: params.action }),
+        };
+
+      case "read-message":
+      case "read-chat": {
+        const jid = toJid(params.phone ?? "");
+        return {
+          url: this.u(creds, "chat/markMessageAsRead"),
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            readMessages: [{ remoteJid: jid, fromMe: false, id: params.messageId }],
+          }),
+        };
+      }
+
+      case "create-group":
+        return {
+          url: this.u(creds, "group/create"),
+          method: "POST",
+          headers,
+          body: JSON.stringify({ subject: params.subject, participants: params.participants }),
+        };
+
+      case "add-participant":
+      case "remove-participant":
+      case "add-admin":
+      case "remove-admin": {
+        const evoAction = action === "add-admin" ? "promote"
+          : action === "remove-admin" ? "demote"
+          : action === "add-participant" ? "add"
+          : "remove";
+        const groupJid = params.phone ?? "";
+        const encodedJid = encodeURIComponent(groupJid);
+        return {
+          url: `${this.u(creds, "group/updateParticipant")}?groupJid=${encodedJid}`,
+          method: "POST",
+          headers,
+          body: JSON.stringify({ action: evoAction, participants: params.participants }),
+        };
+      }
+
+      case "status":
+        return {
+          url: this.u(creds, "instance/connectionState"),
+          method: "GET",
+          headers,
+        };
+
+      case "chats":
+        return {
+          url: `${this.u(creds, "group/fetchAllGroups")}?getParticipants=false`,
+          method: "GET",
+          headers,
+        };
+
+      // No clean Evolution mapping
+      case "get-contact-info":
+      case "send-poll":
+      case "forward":
+      default:
+        return null;
+    }
   }
+
   parseConnection(json: any): { connected: boolean; phone?: string } {
-    throw new Error("not impl");
+    const connected = json?.instance?.state === "open" || json?.state === "open";
+    return { connected };
   }
-  fetchGroups(creds: InstanceCreds): Promise<any[]> {
-    throw new Error("not impl");
+
+  async fetchGroups(creds: InstanceCreds): Promise<NeutralGroup[]> {
+    const url = `${this.u(creds, "group/fetchAllGroups")}?getParticipants=false`;
+    const headers = this.h(creds);
+    const res = await fetch(url, { method: "GET", headers });
+    if (!res.ok) throw new Error(`fetchGroups HTTP ${res.status}`);
+    const json: any[] = await res.json();
+    return json.map((group: any) => ({
+      chatId: group.id,
+      name: group.subject ?? null,
+      participantCount: group.size ?? group.participants?.length,
+    }));
   }
 }
 
