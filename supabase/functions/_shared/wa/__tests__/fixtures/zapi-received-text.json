@@ -1,0 +1,16 @@
+{
+  "type": "ReceivedCallback",
+  "instanceId": "INST123",
+  "messageId": "3EB0A1234567890ABCDE",
+  "phone": "5511999991234",
+  "senderName": "John Doe",
+  "momment": 1720000000000,
+  "fromMe": false,
+  "waitingMessage": false,
+  "isGroup": false,
+  "isCommunity": false,
+  "forwarded": false,
+  "text": {
+    "message": "Olá, mundo!"
+  }
+}

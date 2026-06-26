@@ -157,22 +157,65 @@ export class ZapiProvider implements WaProvider {
     return { providerMsgId: id };
   }
 
-  // ── stubs for methods implemented in later tasks ─────────────────────────
+  // ── webhook identification & auth ─────────────────────────────────────────
 
-  matchesWebhook(_raw: unknown): boolean {
-    throw new Error("not impl");
+  /** Z-API payloads always have a string `type` field. */
+  matchesWebhook(raw: unknown): boolean {
+    return typeof (raw as Record<string, unknown> | null)?.type === "string";
   }
 
-  webhookInstanceKey(_raw: unknown): string | null {
-    throw new Error("not impl");
+  /** Z-API payloads carry `instanceId` as a top-level string. */
+  webhookInstanceKey(raw: unknown): string | null {
+    const r = raw as Record<string, unknown> | null;
+    return typeof r?.instanceId === "string" ? r.instanceId : null;
   }
 
-  verifyWebhookAuth(_raw: unknown, _headers: Headers, _creds: InstanceCreds | null): boolean {
-    throw new Error("not impl");
+  /**
+   * Pure boolean check: compares the `z-api-token` request header against
+   * `creds.webhook_token`. TOFU learning (writing the token to the DB on
+   * first request) is intentionally kept in the orchestrator (Task 15/16).
+   */
+  verifyWebhookAuth(
+    _raw: unknown,
+    headers: Headers,
+    creds: InstanceCreds | null,
+  ): boolean {
+    const supplied = headers.get("z-api-token") ?? "";
+    if (!creds) return false;
+    const stored = (creds as InstanceCreds & { webhook_token?: string | null }).webhook_token;
+    if (!stored) return false;
+    return supplied === stored;
   }
 
-  normalizeInbound(_raw: unknown, _creds: InstanceCreds): Promise<InboundEvent[]> {
-    throw new Error("not impl");
+  // ── inbound normalisation ─────────────────────────────────────────────────
+
+  async normalizeInbound(raw: unknown, _creds: InstanceCreds): Promise<InboundEvent[]> {
+    const p = raw as Record<string, unknown>;
+
+    switch (p.type) {
+      case "ReceivedCallback":
+        return zapiHandleReceived(p);
+      case "DeliveryCallback":
+        return zapiHandleReceived({ ...p, fromMe: true });
+      case "MessageStatusCallback":
+        return zapiHandleStatus(p);
+      case "MessageReactionCallback":
+        return zapiHandleReaction(p);
+      case "EditedMessageCallback":
+        return zapiHandleEdited(p);
+      case "RevokedMessageCallback":
+        return zapiHandleRevoked(p);
+      case "PresenceChatCallback":
+        return []; // presence_events discontinued (migration 0022)
+      case "ConnectedCallback":
+        return [{ kind: "connection", connected: true }];
+      case "DisconnectedCallback":
+        return [{ kind: "connection", connected: false }];
+      case "NotificationCallback":
+        return zapiHandleGroupNotif(p);
+      default:
+        return [];
+    }
   }
 
   fetchMedia(_creds: InstanceCreds, _ref: MediaRef): Promise<MediaPayload> {
@@ -194,3 +237,148 @@ export class ZapiProvider implements WaProvider {
 
 // Register in the factory
 registerProvider(new ZapiProvider());
+
+// ─── Pure mappers (ported from process-webhook/index.ts) ────────────────────
+
+/**
+ * Port of extractMediaInfo (process-webhook:354-365).
+ * Returns messageType, content, caption, and optional MediaRef.
+ */
+function zapiExtractMediaInfo(p: Record<string, unknown>): {
+  messageType: string;
+  content: string | null;
+  caption: string | null;
+  media: MediaRef | null;
+} {
+  type AnyObj = Record<string, unknown>;
+  if (p.text)     return { messageType: "text",     content: (p.text as AnyObj).message as string ?? null, caption: null,                                          media: null };
+  if (p.image)    return { messageType: "image",    content: null,                                                        caption: (p.image as AnyObj).caption as string ?? null,  media: { strategy: "url", url: (p.image as AnyObj).imageUrl as string, mime: (p.image as AnyObj).mimeType as string ?? null, bucket: "whatsapp-images", ext: "jpg", width: (p.image as AnyObj).width as number | undefined, height: (p.image as AnyObj).height as number | undefined, thumbUrl: (p.image as AnyObj).thumbnailUrl as string | undefined } };
+  if (p.audio)    return { messageType: (p.audio as AnyObj).ptt ? "ptt" : "audio", content: null,          caption: null,                                          media: { strategy: "url", url: (p.audio as AnyObj).audioUrl as string, mime: (p.audio as AnyObj).mimeType as string ?? null, bucket: "whatsapp-audio", ext: "ogg", duration: (p.audio as AnyObj).seconds as number | undefined } };
+  if (p.video)    return { messageType: "video",    content: null,                                                        caption: (p.video as AnyObj).caption as string ?? null,  media: { strategy: "url", url: (p.video as AnyObj).videoUrl as string, mime: (p.video as AnyObj).mimeType as string ?? null, bucket: "whatsapp-video", ext: "mp4", duration: (p.video as AnyObj).seconds as number | undefined } };
+  if (p.document) return { messageType: "document", content: (p.document as AnyObj).fileName as string ?? null,           caption: null,                                          media: { strategy: "url", url: (p.document as AnyObj).documentUrl as string, mime: (p.document as AnyObj).mimeType as string ?? null, bucket: "whatsapp-documents", ext: "bin", fileName: (p.document as AnyObj).fileName as string | undefined } };
+  if (p.sticker)  return { messageType: "sticker",  content: null,                                                        caption: null,                                          media: { strategy: "url", url: (p.sticker as AnyObj).stickerUrl as string, mime: (p.sticker as AnyObj).mimeType as string ?? null, bucket: "whatsapp-stickers", ext: "webp" } };
+  if (p.location) return { messageType: "location", content: JSON.stringify(p.location),                                  caption: null,                                          media: null };
+  if (p.contact)  return { messageType: "contact",  content: (p.contact as AnyObj).displayName as string ?? null,         caption: null,                                          media: null };
+  if (p.poll)     return { messageType: "poll",     content: (p.poll as AnyObj).name as string ?? null,                   caption: null,                                          media: null };
+  return { messageType: "unknown", content: null, caption: null, media: null };
+}
+
+/**
+ * Port of handleReceived (process-webhook:261-352).
+ * Defensive redirects then builds InboundEvent for messages.
+ */
+function zapiHandleReceived(p: Record<string, unknown>): InboundEvent[] {
+  // waitingMessage: Z-API delivers webhook before decrypting content — skip
+  if (p.waitingMessage === true) return [];
+
+  // Defensive redirects: Z-API sometimes wraps non-message events in ReceivedCallback
+  if (p.notification) return zapiHandleGroupNotif(p);
+  if (p.reaction)     return zapiHandleReaction(p);
+  if (p.isEdit)       return zapiHandleEdited(p);
+  if (p.pinMessage)   return []; // no schema for pin/unpin, skip
+
+  const ts = new Date((p.momment as number) ?? Date.now()).toISOString();
+  const chatId = p.phone as string;
+
+  // senderPhone port of process-webhook:322-324
+  const senderPhone = p.fromMe
+    ? ((p.connectedPhone ?? p.participantPhone ?? null) as string | null)
+    : ((p.participantPhone ?? p.phone ?? null) as string | null);
+
+  const { messageType, content, caption, media } = zapiExtractMediaInfo(p);
+
+  const ev: InboundEvent = {
+    kind: "message",
+    chatId,
+    chatName: (p.chatName as string | null) ?? null,
+    isGroup: !!p.isGroup,
+    fromMe: !!p.fromMe,
+    senderPhone,
+    senderName: (p.senderName as string | null) ?? null,
+    providerMsgId: p.messageId as string,
+    messageType: messageType as import("./types.ts").MsgType,
+    content,
+    caption,
+    quotedProviderId: ((p.referencedMessage as Record<string, unknown> | undefined)?.messageId as string | null) ?? null,
+    isForwarded: !!p.forwarded,
+    timestamp: ts,
+    media,
+    raw: p,
+  };
+  return [ev];
+}
+
+/** Port of handleStatus (process-webhook:367-377). */
+function zapiHandleStatus(p: Record<string, unknown>): InboundEvent[] {
+  const sendMap: Record<string, import("./types.ts").SendStatus> = {
+    SENT: "sent", RECEIVED: "delivered", READ: "read", PLAYED: "read",
+  };
+  const status = sendMap[p.status as string];
+  if (!status) return [];
+  const ids = Array.isArray(p.ids) ? (p.ids as string[]) : [];
+  return [{ kind: "status", providerMsgIds: ids, status }];
+}
+
+/** Port of handleReaction (process-webhook:379-405). */
+function zapiHandleReaction(p: Record<string, unknown>): InboundEvent[] {
+  type AnyObj = Record<string, unknown>;
+  const reaction = p.reaction as AnyObj | undefined;
+  const targetId =
+    (reaction?.referencedMessage as AnyObj | undefined)?.messageId as string | undefined
+    ?? (p.referencedMessage as AnyObj | undefined)?.messageId as string | undefined;
+  if (!targetId) return [];
+
+  const emoji = (reaction?.value as string | undefined) ?? null;
+  const chatId = p.phone as string;
+
+  const reactorPhone = p.fromMe
+    ? ((p.connectedPhone ?? p.participantPhone ?? chatId) as string | null)
+    : ((p.participantPhone ?? chatId) as string | null);
+
+  const rawTime = (reaction?.time as number | undefined) ?? Date.now();
+  const ts = new Date(rawTime < 1e12 ? rawTime * 1000 : rawTime).toISOString();
+
+  return [{
+    kind: "reaction",
+    chatId,
+    targetProviderMsgId: targetId,
+    reactorPhone,
+    reactorName: (p.senderName as string | null) ?? null,
+    emoji,
+    fromMe: !!p.fromMe,
+    timestamp: ts,
+    raw: p,
+  }];
+}
+
+/** Port of handleEdited (process-webhook:407-415). */
+function zapiHandleEdited(p: Record<string, unknown>): InboundEvent[] {
+  const newContent = ((p.text as Record<string, unknown> | undefined)?.message as string | null) ?? null;
+  return [{ kind: "edit", providerMsgId: p.messageId as string, newContent }];
+}
+
+/** Port of handleRevoked (process-webhook:417-421). */
+function zapiHandleRevoked(p: Record<string, unknown>): InboundEvent[] {
+  return [{ kind: "revoke", providerMsgId: p.messageId as string }];
+}
+
+/** Port of handleGroupNotif (process-webhook:431-445). */
+function zapiHandleGroupNotif(p: Record<string, unknown>): InboundEvent[] {
+  const notifMap: Record<string, "add" | "remove" | "promote" | "demote"> = {
+    GROUP_PARTICIPANT_ADD:     "add",
+    GROUP_PARTICIPANT_REMOVE:  "remove",
+    GROUP_PARTICIPANT_PROMOTE: "promote",
+    GROUP_PARTICIPANT_DEMOTE:  "demote",
+  };
+  const action = notifMap[p.notification as string];
+  if (!action) return [];
+  const phones: string[] = Array.isArray(p.notificationParameters)
+    ? (p.notificationParameters as string[])
+    : [];
+  return [{
+    kind: "group_participant",
+    chatId: p.phone as string,
+    action,
+    phones,
+  }];
+}

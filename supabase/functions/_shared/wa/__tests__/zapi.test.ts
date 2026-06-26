@@ -2,6 +2,10 @@
 import { assertEquals } from "jsr:@std/assert";
 import { ZapiProvider } from "../zapi.ts";
 import type { InstanceCreds } from "../types.ts";
+import receivedText from "./fixtures/zapi-received-text.json" with { type: "json" };
+import receivedImage from "./fixtures/zapi-received-image.json" with { type: "json" };
+import statusPayload from "./fixtures/zapi-status.json" with { type: "json" };
+import reactionPayload from "./fixtures/zapi-reaction.json" with { type: "json" };
 
 const z = new ZapiProvider();
 const creds: InstanceCreds = {
@@ -36,6 +40,165 @@ Deno.test("zapi.parseSendResult prioriza messageId", () => {
   assertEquals(z.parseSendResult({ messageId: "M1", id: "X" }), { providerMsgId: "M1" });
   assertEquals(z.parseSendResult({ id: "X" }), { providerMsgId: "X" });
 });
+
+// ── normalizeInbound / matchesWebhook / webhookInstanceKey / verifyWebhookAuth ──
+
+Deno.test("zapi.normalizeInbound: ReceivedCallback texto → 1 evento message", async () => {
+  const evs = await z.normalizeInbound(receivedText, creds);
+  assertEquals(evs.length, 1);
+  const ev = evs[0];
+  assertEquals(ev.kind, "message");
+  if (ev.kind === "message") {
+    assertEquals(ev.messageType, "text");
+    assertEquals(ev.fromMe, false);
+    assertEquals(typeof ev.providerMsgId, "string");
+    assertEquals(ev.content, "Olá, mundo!");
+    assertEquals(ev.chatId, "5511999991234");
+  }
+});
+
+Deno.test("zapi.normalizeInbound: ReceivedCallback imagem → evento message com media", async () => {
+  const evs = await z.normalizeInbound(receivedImage, creds);
+  assertEquals(evs.length, 1);
+  const ev = evs[0];
+  assertEquals(ev.kind, "message");
+  if (ev.kind === "message") {
+    assertEquals(ev.messageType, "image");
+    assertEquals(ev.media !== null, true);
+    if (ev.media) {
+      assertEquals(ev.media.strategy, "url");
+      assertEquals(ev.media.bucket, "whatsapp-images");
+      assertEquals(ev.media.ext, "jpg");
+      assertEquals(ev.media.url, "https://media.z-api.io/img/sample.jpg");
+      assertEquals(ev.media.width, 1280);
+      assertEquals(ev.media.height, 720);
+      assertEquals(ev.media.thumbUrl, "https://media.z-api.io/img/sample-thumb.jpg");
+    }
+    assertEquals(ev.caption, "Veja essa foto");
+  }
+});
+
+Deno.test("zapi.normalizeInbound: waitingMessage=true → retorna []", async () => {
+  const waiting = { ...receivedText, waitingMessage: true };
+  const evs = await z.normalizeInbound(waiting, creds);
+  assertEquals(evs.length, 0);
+});
+
+Deno.test("zapi.normalizeInbound: MessageStatusCallback → evento status", async () => {
+  const evs = await z.normalizeInbound(statusPayload, creds);
+  assertEquals(evs.length, 1);
+  assertEquals(evs[0].kind, "status");
+  if (evs[0].kind === "status") {
+    assertEquals(evs[0].status, "read");
+    assertEquals(evs[0].providerMsgIds.length, 2);
+  }
+});
+
+Deno.test("zapi.normalizeInbound: ReactionCallback (via ReceivedCallback) → evento reaction", async () => {
+  const evs = await z.normalizeInbound(reactionPayload, creds);
+  assertEquals(evs.length, 1);
+  assertEquals(evs[0].kind, "reaction");
+  if (evs[0].kind === "reaction") {
+    assertEquals(evs[0].emoji, "👍");
+    assertEquals(evs[0].targetProviderMsgId, "3EB0A1234567890ABCDE");
+  }
+});
+
+Deno.test("zapi.normalizeInbound: ConnectedCallback → evento connection", async () => {
+  const conn = { type: "ConnectedCallback", instanceId: "INST123" };
+  const evs = await z.normalizeInbound(conn, creds);
+  assertEquals(evs.length, 1);
+  assertEquals(evs[0].kind, "connection");
+  if (evs[0].kind === "connection") {
+    assertEquals(evs[0].connected, true);
+  }
+});
+
+Deno.test("zapi.normalizeInbound: DisconnectedCallback → evento connection desconectado", async () => {
+  const disc = { type: "DisconnectedCallback", instanceId: "INST123" };
+  const evs = await z.normalizeInbound(disc, creds);
+  assertEquals(evs.length, 1);
+  assertEquals(evs[0].kind, "connection");
+  if (evs[0].kind === "connection") {
+    assertEquals(evs[0].connected, false);
+  }
+});
+
+Deno.test("zapi.normalizeInbound: RevokedMessageCallback → evento revoke", async () => {
+  const revoke = { type: "RevokedMessageCallback", instanceId: "INST123", messageId: "MSG_REVOKED" };
+  const evs = await z.normalizeInbound(revoke, creds);
+  assertEquals(evs.length, 1);
+  assertEquals(evs[0].kind, "revoke");
+  if (evs[0].kind === "revoke") {
+    assertEquals(evs[0].providerMsgId, "MSG_REVOKED");
+  }
+});
+
+Deno.test("zapi.normalizeInbound: EditedMessageCallback → evento edit", async () => {
+  const edit = {
+    type: "EditedMessageCallback", instanceId: "INST123",
+    messageId: "MSG_EDITED", text: { message: "novo conteudo" },
+  };
+  const evs = await z.normalizeInbound(edit, creds);
+  assertEquals(evs.length, 1);
+  assertEquals(evs[0].kind, "edit");
+  if (evs[0].kind === "edit") {
+    assertEquals(evs[0].providerMsgId, "MSG_EDITED");
+    assertEquals(evs[0].newContent, "novo conteudo");
+  }
+});
+
+Deno.test("zapi.normalizeInbound: NotificationCallback ADD → evento group_participant", async () => {
+  const notif = {
+    type: "NotificationCallback", instanceId: "INST123",
+    phone: "5511group", notification: "GROUP_PARTICIPANT_ADD",
+    notificationParameters: ["5511999990001", "5511999990002"],
+  };
+  const evs = await z.normalizeInbound(notif, creds);
+  assertEquals(evs.length, 1);
+  assertEquals(evs[0].kind, "group_participant");
+  if (evs[0].kind === "group_participant") {
+    assertEquals(evs[0].action, "add");
+    assertEquals(evs[0].chatId, "5511group");
+    assertEquals(evs[0].phones, ["5511999990001", "5511999990002"]);
+  }
+});
+
+Deno.test("zapi.normalizeInbound: tipo desconhecido → []", async () => {
+  const unknown = { type: "SomeUnknownCallback", instanceId: "INST123" };
+  const evs = await z.normalizeInbound(unknown, creds);
+  assertEquals(evs.length, 0);
+});
+
+Deno.test("zapi.matchesWebhook usa presença de `type`", () => {
+  assertEquals(z.matchesWebhook({ type: "ReceivedCallback" }), true);
+  assertEquals(z.matchesWebhook({ event: "messages.upsert" }), false);
+  assertEquals(z.matchesWebhook(null), false);
+  assertEquals(z.matchesWebhook({}), false);
+});
+
+Deno.test("zapi.webhookInstanceKey retorna instanceId ou null", () => {
+  assertEquals(z.webhookInstanceKey({ instanceId: "INST123" }), "INST123");
+  assertEquals(z.webhookInstanceKey({ type: "SomeCallback" }), null);
+  assertEquals(z.webhookInstanceKey(null), null);
+});
+
+Deno.test("zapi.verifyWebhookAuth compara header z-api-token com creds", () => {
+  const credsWithToken = { ...creds, webhook_token: "secret-wh-token" } as any;
+  const headers = new Headers({ "z-api-token": "secret-wh-token" });
+  const wrongHeaders = new Headers({ "z-api-token": "wrong-token" });
+  const emptyHeaders = new Headers();
+
+  assertEquals(z.verifyWebhookAuth({}, headers, credsWithToken), true);
+  assertEquals(z.verifyWebhookAuth({}, wrongHeaders, credsWithToken), false);
+  assertEquals(z.verifyWebhookAuth({}, emptyHeaders, credsWithToken), false);
+  // null creds → false
+  assertEquals(z.verifyWebhookAuth({}, headers, null), false);
+  // creds without webhook_token → false (no TOFU here)
+  assertEquals(z.verifyWebhookAuth({}, headers, creds), false);
+});
+
+// ── mentionsEveryone ─────────────────────────────────────────────────────────
 
 // Testa mentionsEveryone via stub de globalThis.fetch
 Deno.test("zapi.buildSend mentionsEveryone expande participantes do grupo", async () => {
