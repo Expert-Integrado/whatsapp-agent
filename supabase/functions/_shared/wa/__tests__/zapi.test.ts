@@ -323,6 +323,55 @@ Deno.test("zapi.resolveChatIds não modifica @lid em grupo", async () => {
   assertEquals((out[0] as any).chatId, "GRP@lid");
 });
 
+// ── buildAction ──────────────────────────────────────────────────────────────
+
+Deno.test("zapi.buildAction send-reaction monta /send-reaction", () => {
+  const r = z.buildAction(creds, "send-reaction", { phone: "5511", messageId: "M", reaction: "👍" });
+  assertEquals(r!.url.endsWith("/send-reaction"), true);
+  assertEquals(r!.method, "POST");
+  assertEquals(r!.headers["Client-Token"], "CT");
+  assertEquals(JSON.parse(r!.body!), { phone: "5511", messageId: "M", reaction: "👍" });
+});
+
+Deno.test("zapi.buildAction get-contact-info vira GET /contacts/{phone}", () => {
+  const r = z.buildAction(creds, "get-contact-info", { phone: "5511" });
+  assertEquals(r!.method, "GET");
+  assertEquals(r!.url.endsWith("/contacts/5511"), true);
+  assertEquals(r!.body, undefined);
+});
+
+Deno.test("zapi.parseConnection lê connected/smartphoneConnected", () => {
+  assertEquals(z.parseConnection({ connected: true }).connected, true);
+  assertEquals(z.parseConnection({ smartphoneConnected: true }).connected, true);
+  assertEquals(z.parseConnection({ connected: false, smartphoneConnected: false }).connected, false);
+  assertEquals(z.parseConnection({}).connected, false);
+  assertEquals(z.parseConnection({ phone: "5511", connected: true }).phone, "5511");
+});
+
+Deno.test("zapi.fetchGroups filtra grupos e mapeia para NeutralGroup", async () => {
+  const orig = globalThis.fetch;
+  globalThis.fetch = ((_url: string | URL | Request, _init?: RequestInit) =>
+    Promise.resolve(new Response(JSON.stringify([
+      { isGroup: true, phone: "1111111111", name: "Grupo A" },
+      { isGroup: false, phone: "2222222222", name: "Contato B" },
+      { isGroup: true, chatId: "3333333333", chatName: "Grupo C" },
+      { type: "group", id: "4444444444", subject: "Grupo D" },
+    ]), { status: 200, headers: { "Content-Type": "application/json" } }))
+  ) as typeof fetch;
+  try {
+    const groups = await z.fetchGroups(creds);
+    assertEquals(groups.length, 3);
+    assertEquals(groups[0].chatId, "1111111111");
+    assertEquals(groups[0].name, "Grupo A");
+    assertEquals(groups[1].chatId, "3333333333");
+    assertEquals(groups[1].name, "Grupo C");
+    assertEquals(groups[2].chatId, "4444444444");
+    assertEquals(groups[2].name, "Grupo D");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
 // ── mentionsEveryone ─────────────────────────────────────────────────────────
 
 // Testa mentionsEveryone via stub de globalThis.fetch

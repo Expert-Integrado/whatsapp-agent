@@ -372,16 +372,60 @@ export class ZapiProvider implements WaProvider {
     return result;
   }
 
-  buildAction(_creds: InstanceCreds, _action: WaAction, _params: unknown): BuiltRequest | null {
-    throw new Error("not impl");
+  buildAction(creds: InstanceCreds, action: WaAction, params: unknown): BuiltRequest | null {
+    const base = `https://api.z-api.io/instances/${creds.instance_id}/token/${creds.auth_token}`;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Client-Token": creds.client_token!,
+    };
+    const p = params as Record<string, unknown>;
+
+    // Special case: get-contact-info → GET /contacts/{phone}, no body
+    if (action === "get-contact-info") {
+      const phone = encodeURIComponent(String(p.phone ?? ""));
+      return {
+        url: `${base}/contacts/${phone}`,
+        method: "GET",
+        headers,
+      };
+    }
+
+    // Generic case: POST /{action} with full params as body
+    return {
+      url: `${base}/${action}`,
+      method: "POST",
+      headers,
+      body: JSON.stringify(params),
+    };
   }
 
-  parseConnection(_json: unknown): { connected: boolean; phone?: string } {
-    throw new Error("not impl");
+  parseConnection(json: unknown): { connected: boolean; phone?: string } {
+    const j = json as Record<string, unknown> | null | undefined;
+    const connected = (j?.connected ?? j?.smartphoneConnected ?? false) as boolean;
+    const phone = j?.phone as string | undefined;
+    return phone !== undefined ? { connected, phone } : { connected };
   }
 
-  fetchGroups(_creds: InstanceCreds): Promise<NeutralGroup[]> {
-    throw new Error("not impl");
+  async fetchGroups(creds: InstanceCreds): Promise<NeutralGroup[]> {
+    const base = `https://api.z-api.io/instances/${creds.instance_id}/token/${creds.auth_token}`;
+    const headers: Record<string, string> = {
+      "Client-Token": creds.client_token!,
+    };
+    const r = await fetch(`${base}/chats`, { headers });
+    if (!r.ok) return [];
+    const raw = await r.json();
+    const allChats: Record<string, unknown>[] = Array.isArray(raw)
+      ? raw
+      : (raw?.value ?? raw?.chats ?? raw?.data ?? []);
+    return allChats
+      .filter((c) => c.isGroup === true || c.is_group === true || c.type === "group")
+      .map((c) => {
+        const rawId = String(c.phone ?? c.id ?? c.chatId ?? "");
+        const name = (c.name ?? c.chatName ?? c.subject ?? c.groupName ?? null) as string | null;
+        const result: NeutralGroup = { chatId: rawId, name };
+        if (typeof c.participantCount === "number") result.participantCount = c.participantCount;
+        return result;
+      });
   }
 }
 
