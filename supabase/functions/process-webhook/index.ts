@@ -244,7 +244,7 @@ Deno.serve(async (req) => {
 async function routeEvent(p: any) {
   switch (p.type) {
     case "ReceivedCallback":        return handleReceived(p);
-    case "DeliveryCallback":        return handleReceived({ ...p, fromMe: true });
+    case "DeliveryCallback":        return; // ack de entrega (só zaapId/messageId, SEM conteúdo) — NÃO insere placeholder. Antes: handleReceived({fromMe:true}) criava linha message_type='unknown' que chegava ~127ms ANTES do ReceivedCallback com o texto e o bloqueava por UNIQUE(provider_msg_id) → fala de SAÍDA (API/agente/boas-vindas M77) travava como unknown/content:null pra sempre. O ReceivedCallback echo grava o texto. (Mesma classe do guard de waitingMessage acima.)
     case "MessageStatusCallback":   return handleStatus(p);
     case "MessageReactionCallback": return handleReaction(p);
     case "EditedMessageCallback":   return handleEdited(p);
