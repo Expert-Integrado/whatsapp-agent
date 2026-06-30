@@ -695,8 +695,8 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (error || !media) return json({ error: "Nenhuma midia associada a esta mensagem." }, 404);
         let public_url: string | null = null;
         if (media.storage_path && media.download_status === "done") {
-          const { data } = supabase.storage.from(media.storage_bucket).getPublicUrl(media.storage_path);
-          public_url = data?.publicUrl ?? null;
+          const { data } = await supabase.storage.from(media.storage_bucket).createSignedUrl(media.storage_path, 3600);
+          public_url = data?.signedUrl ?? null;
         }
         return json({
           ok: true, public_url, original_url: media.original_url, mime_type: media.mime_type,
@@ -919,7 +919,7 @@ function rpc(id: any, payload: Record<string, unknown>): Response {
 const rpcResult = (id: any, result: unknown) => rpc(id, { result });
 const rpcError = (id: any, code: number, message: string) => rpc(id, { error: { code, message } });
 
-const SERVER_INFO = { name: "whatsapp-agent", version: "3.0.0" };
+const SERVER_INFO = { name: "whatsapp-agent", version: "3.0.1" };
 const PROTOCOL_VERSION = "2024-11-05";
 
 // Schemas expostos no tools/list — MVP: status, inbox, read.
