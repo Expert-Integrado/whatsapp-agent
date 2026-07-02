@@ -337,7 +337,7 @@ async function handleReceived(p: any) {
     content,
     caption,
     raw_type_hint: rawTypeHint,
-    quoted_msg_id: p.referencedMessage?.messageId ?? null,
+    quoted_msg_id: p.referenceMessageId ?? p.referencedMessage?.messageId ?? null,  // reply real da Z-API = referenceMessageId (flat, topo); fallback referencedMessage.messageId p/ shapes aninhados (reação). Bug corrigido 02/07: só o aninhado dava quoted_msg_id sempre null.
     is_forwarded: !!p.forwarded,
     message_ts: new Date(p.momment ?? Date.now()).toISOString(),
     raw_payload: rawPayload,
