@@ -2,6 +2,11 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [3.0.2] — 2026-07-06
+
+### Fixed
+- **Regra `tu-pronome` removida das `HARD_RULES` universais** (`mcp-api`). Pronome (tu/você) é traço **pessoal/regional** do dono, não um fingerprint universal de IA — quem usa "tu" (ex: nordestino) e quem usa "você" estão ambos corretos. A regra marcava qualquer `tu/teu/tua` como violação `high` para **todos** que instalam o agent, forçando "vc/seu" indevidamente. A escolha de pronome passa a ser responsabilidade exclusiva do `voice_guide` de cada instância (`public.voice_guide`), nunca hardcoded como regra global. As outras 7 hard-rules — em-dash, saudação genérica, hype, urgência manufaturada, softener, validação afetiva e rsrs, essas sim universais — permanecem intactas.
+
 ## [2.2.1] — 2026-06-17
 
 ### Fixed
