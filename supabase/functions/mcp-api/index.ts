@@ -315,6 +315,21 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
         if (lids.every(() => phoneVariants.includes(phoneCanonical)))
           return { chat_id: phoneCanonical, chat_name: numericos[0].chat_name || numericos[0].contact_name, instance_id: numericos[0].instance_id };
       }
+      // Par real + fantasma do 9o digito: dois chats numericos, mesma instancia,
+      // variantes um do outro. O real tem identidade (nome de contato ou chat_name
+      // diferente do proprio numero); o fantasma nao — e nao pode vencer por recencia,
+      // porque envios engolidos renovam o last_message_at dele.
+      if (numericos.length === 2 && numericos[0].instance_id === numericos[1].instance_id
+          && normalizePhoneBR(String(numericos[0].chat_id)).includes(String(numericos[1].chat_id))) {
+        // Na view, contact_name = chat_name; fantasma tem nome = proprio numero.
+        const hasIdentity = (c: any) => {
+          const n = c.chat_name || c.contact_name;
+          return !!n && n !== c.chat_id;
+        };
+        const [a, b] = numericos;
+        const real = hasIdentity(a) && !hasIdentity(b) ? a : (hasIdentity(b) && !hasIdentity(a) ? b : null);
+        if (real) return { chat_id: real.chat_id, chat_name: real.chat_name || real.contact_name, instance_id: real.instance_id };
+      }
       const ranked = exact.map((c: any) => ({ ...c, _score: applyChatBoost(50, c) })).sort((a: any, b: any) => b._score - a._score);
       if (ranked[0]._score - ranked[1]._score >= 5) return { chat_id: ranked[0].chat_id, chat_name: ranked[0].chat_name || ranked[0].contact_name, instance_id: ranked[0].instance_id };
       return { candidates: ranked.slice(0, 5).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, instance: c.instance_id })) };
@@ -358,6 +373,24 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
   if (top._score >= MIN_CONFIDENT_SCORE && top._score - runner._score >= MIN_WINNING_GAP)
     return { chat_id: top.chat_id, chat_name: top.chat_name || top.contact_name, instance_id: top.instance_id };
   return { candidates: scored.slice(0, 10).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, last_message_at: c.last_message_at, instance: c.instance_id })) };
+}
+
+// ─── Canonicalizacao do 9o digito (bug do chat fantasma — ClickUp 86ajby187) ──
+// Contas BR antigas sao registradas SEM o 9o digito. Enviar pro numero com 9
+// quando a conta e sem-9 cria um chat fantasma na Z-API: a 1a msg chega (remap
+// do WhatsApp), as seguintes morrem no orfao e a API segue respondendo 200.
+// GET /phone-exists/{phone} devolve o numero canonico registrado + lid.
+async function canonicalizePhone(digits: string, instanceId: string): Promise<{ exists: boolean; phone?: string; lid?: string; error?: string }> {
+  const { status, data } = await callEdge("zapi-proxy", {
+    action: "phone-exists", params: { phone: digits },
+    agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: instanceId,
+  });
+  if (status >= 400) return { exists: false, error: data?.error || `zapi-proxy ${status}` };
+  const raw = data?.result;
+  const r = Array.isArray(raw) ? raw[0] : raw;
+  if (!r || typeof r.exists !== "boolean") return { exists: false, error: "resposta inesperada do phone-exists" };
+  const canonical = String(r.phone ?? "").replace(/\D/g, "");
+  return { exists: r.exists, ...(canonical && { phone: canonical }), ...(r.lid && { lid: String(r.lid) }) };
 }
 
 // delay de digitacao humanizado (portado do mcp/index.js — antes era client-side)
@@ -724,10 +757,20 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           if (!allow_new) return json({ ok: false, error: looksLikePhone ? `Numero "${to}" nao esta em chats. Passe allow_new=true pra primeiro contato.` : resolved.error });
           if (!looksLikePhone) return json({ error: `allow_new=true so com phone valido (10-13 digitos).` }, 400);
           if (!wantInstance) return json({ error: `Primeiro contato (allow_new) exige 'instance'.` }, 400);
-          const newChatId = digits.startsWith("55") ? digits : `55${digits}`;
+          // Canonicaliza o 9o digito via phone-exists ANTES de criar o chat: usar o
+          // numero como digitado cria chat fantasma quando a conta e registrada sem o 9.
+          const typedPhone = digits.startsWith("55") ? digits : `55${digits}`;
+          const check = await canonicalizePhone(typedPhone, wantInstance);
+          if (!check.error && !check.exists) return json({ ok: false, error: `Numero "${to}" nao tem WhatsApp (verificado via phone-exists).` }, 400);
+          const newChatId = check.phone || typedPhone;
           const { error: insErr } = await supabase.from("chats").upsert({ instance_id: wantInstance, chat_id: newChatId, phone: newChatId, chat_name: newChatId, is_group: false, last_message_at: new Date().toISOString() }, { onConflict: "instance_id,chat_id" });
           if (insErr) return json({ error: `Falha ao criar chat: ${insErr.message}` }, 500);
-          resolved = { chat_id: newChatId, chat_name: newChatId, instance_id: wantInstance, _new: true };
+          if (check.lid) {
+            await supabase.from("lid_mapping").upsert({ instance_id: wantInstance, lid: check.lid, phone: newChatId, resolved_via: "zapi" }, { onConflict: "instance_id,lid" });
+          }
+          resolved = { chat_id: newChatId, chat_name: newChatId, instance_id: wantInstance, _new: true,
+            ...(check.error && { _phone_unverified: check.error }),
+            ...(newChatId !== typedPhone && { _canonicalized_from: typedPhone }) };
         }
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
         if (type !== "text" && !media_url) return json({ error: `media_url obrigatorio pra type "${type}".` }, 400);
@@ -758,7 +801,10 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(mentions?.length && { mentions }), ...(mentions_everyone && { mentions_everyone: true }) };
         const { status, data } = await callEdge("send-message", sendBody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-message ${status}`, detail: data }, status);
-        return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance });
+        return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance,
+          ...(resolved._canonicalized_from && { phone_canonicalized: { typed: resolved._canonicalized_from, canonical: resolved.chat_id } }),
+          ...(resolved._phone_unverified && { warning: `phone-exists indisponivel (${resolved._phone_unverified}); numero usado como digitado — confirme entrega com check_delivery.` }),
+          ...(resolved._new && { delivery_hint: "Primeiro contato: confirme a entrega com check_delivery (message_id) apos alguns segundos." }) });
       }
 
       case "send_voice": {
@@ -900,6 +946,51 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         });
       }
 
+      case "check_delivery": {
+        // Verificacao de entrega: o process-webhook ja grava delivered/read no
+        // send_status via MessageStatusCallback; aqui esse dado vira acao. Mensagem
+        // de agente presa em sent/pending e o sintoma classico de chat fantasma.
+        const { message_id, chat, limit = 10, instance } = params;
+        if (!message_id && !chat) return json({ error: "Forneca message_id OU chat." }, 400);
+        let q = supabase.from("messages")
+          .select("id,chat_id,instance_id,message_type,content,send_status,send_error,message_ts")
+          .eq("from_me", true).eq("sent_by_agent", true)
+          .order("message_ts", { ascending: false }).limit(Math.min(50, Number(limit) || 10));
+        if (message_id) q = q.eq("id", message_id);
+        else {
+          const resolved = await resolveChat(chat, instance);
+          if (resolved.error) return json({ error: resolved.error }, 400);
+          if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
+          q = q.eq("chat_id", resolved.chat_id);
+          if (resolved.instance_id) q = q.eq("instance_id", resolved.instance_id);
+        }
+        const { data: rows, error } = await q;
+        if (error) return json({ error: error.message }, 500);
+        if (!rows?.length) return json({ ok: true, messages: [], message: "Nenhuma mensagem de agente encontrada." });
+        const STUCK_MS = 2 * 60 * 1000;
+        const out = rows.map((m: any) => {
+          const ageMs = m.message_ts ? Date.now() - new Date(m.message_ts).getTime() : 0;
+          const delivered = m.send_status === "delivered" || m.send_status === "read";
+          const stuck = !delivered && (m.send_status === "sent" || m.send_status === "pending") && ageMs > STUCK_MS;
+          return { id: m.id, chat_id: m.chat_id, instance: m.instance_id, send_status: m.send_status,
+                   ...(m.send_error && { send_error: m.send_error }), message_ts: m.message_ts, message_ts_brt: toBRT(m.message_ts),
+                   preview: (m.content || `[${m.message_type}]`).slice(0, 80), delivered, stuck };
+        });
+        const stuckCount = out.filter((m: any) => m.stuck).length;
+        return json({ ok: true, messages: out, stuck_count: stuckCount,
+          ...(stuckCount ? { alert: "Mensagem(ns) sem confirmacao de entrega ha 2+ min. Possivel chat fantasma do 9o digito: rode merge_ghost_chats (dry_run) e confira o numero canonico via zapi_action phone-exists." } : {}) });
+      }
+
+      case "merge_ghost_chats": {
+        // Funde pares real+fantasma do 9o digito ja existentes no banco.
+        // dry_run=true (default) so lista o que seria feito.
+        const { dry_run = true } = params;
+        const { data, error } = await supabase.rpc("merge_ninth_digit_ghosts", { p_dry_run: dry_run !== false });
+        if (error) return json({ error: error.message, hint: "Migration 0031_merge_ninth_digit_ghosts.sql aplicada?" }, 500);
+        const rows = data || [];
+        return json({ ok: true, dry_run: dry_run !== false, pairs: rows.length, results: rows });
+      }
+
       default: return json({ error: "action_not_implemented", action }, 400);
     }
   } catch (e) {
@@ -922,7 +1013,7 @@ function rpc(id: any, payload: Record<string, unknown>): Response {
 const rpcResult = (id: any, result: unknown) => rpc(id, { result });
 const rpcError = (id: any, code: number, message: string) => rpc(id, { error: { code, message } });
 
-const SERVER_INFO = { name: "whatsapp-agent", version: "3.0.1" };
+const SERVER_INFO = { name: "whatsapp-agent", version: "3.1.0" };
 const PROTOCOL_VERSION = "2024-11-05";
 
 // Schemas expostos no tools/list — MVP: status, inbox, read.
@@ -1202,6 +1293,31 @@ const TOOL_SCHEMAS = [
     inputSchema: {
       type: "object",
       properties: { instance: { type: "string", description: "Instancia (alias ou instance_id)" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "check_delivery",
+    description: "Verifica status de entrega (pending/sent/delivered/read) de mensagens enviadas pelo agente. Use apos send pra primeiro contato ou quando suspeitar que mensagens nao estao chegando (chat fantasma do 9o digito). Mensagem presa em sent/pending ha 2+ min = alerta.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "UUID da mensagem (retornado pelo send)" },
+        chat: { type: "string", description: "Alternativa: nome, telefone ou chat_id — verifica as ultimas mensagens do agente nesse chat" },
+        limit: { type: "number", description: "Quantas mensagens verificar quando usar chat (default 10, max 50)" },
+        instance: { type: "string", description: "Instancia (alias ou instance_id)" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "merge_ghost_chats",
+    description: "Encontra e funde pares de chats duplicados pelo 9o digito (real + fantasma) na mesma instancia: move mensagens/categorias pro chat real e apaga o fantasma. dry_run=true (default) so lista os pares sem alterar nada.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: { type: "boolean", description: "true (default) = so lista; false = executa o merge" },
+      },
       additionalProperties: false,
     },
   },

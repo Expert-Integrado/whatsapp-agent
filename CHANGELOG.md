@@ -2,6 +2,21 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [3.1.0] — 2026-07-06
+
+Fix do bug de envio pra chat novo que engolia mensagens (ClickUp 86ajby187). A causa raiz **não era o remap de LID**: era o **9º dígito BR**. Contas antigas são registradas no WhatsApp sem o 9 — enviar pro número com 9 criava um **chat fantasma** (a 1ª mensagem chegava via remap do WhatsApp, as seguintes morriam no órfão e a Z-API seguia respondendo 200).
+
+### Fixed
+- **`send` com `allow_new` canonicaliza o 9º dígito** (`mcp-api`): antes de criar o chat de primeiro contato, consulta `GET /phone-exists/{phone}` na Z-API e usa o **número canônico registrado** como `chat_id` (o `lid` retornado já alimenta o `lid_mapping`). Número sem WhatsApp é recusado na hora, em vez de "enviar" pro nada. Se o `phone-exists` estiver fora, degrada pro comportamento antigo com `warning` explícito na resposta.
+- **`resolveChat` não deixa mais o fantasma vencer**: quando existem dois chats numéricos na mesma instância que são variantes de 9º dígito um do outro, ganha o que tem identidade (nome real de contato) — antes o desempate era por recência, e os envios engolidos renovavam o `last_message_at` do próprio fantasma.
+
+### Added
+- **Tool `merge_ghost_chats`** + migration `0031` (função `merge_ninth_digit_ghosts`): encontra pares real+fantasma já existentes, move mensagens/categorias/reações pro chat real, redireciona o `lid_mapping`, funde metadados e apaga o fantasma. `dry_run=true` por default; pares ambíguos são reportados e não são tocados.
+- **Tool `check_delivery`** (verificação de entrega): expõe o `send_status` (`pending/sent/delivered/read`) que o `process-webhook` já gravava via `MessageStatusCallback`. Mensagem de agente presa em `sent`/`pending` há 2+ min vira alerta com diagnóstico de chat fantasma. O `send` pra chat novo passa a devolver `delivery_hint` sugerindo a verificação.
+- **Action `phone-exists`** na allowlist READ do `zapi-proxy` (`GET /phone-exists/{phone}`).
+
+> Depois do deploy, rode `merge_ghost_chats` com `dry_run=true`, confira os pares e rode com `dry_run=false` pra limpar os fantasmas históricos.
+
 ## [3.0.2] — 2026-07-06
 
 ### Fixed
