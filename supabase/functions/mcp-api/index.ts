@@ -371,7 +371,10 @@ function humanizedTypingSeconds(type: string, content: string): number {
 
 // ─── Voice guide — regras hard universais (portado do mcp/index.js) ───────────
 const HARD_RULES: { id: string; pattern: RegExp; severity: string; message: string }[] = [
-  { id: "tu-pronome", pattern: /\b(tu|teu|tua|teus|tuas|ti)\b/iu, severity: "high", message: "Detectado uso de 'tu/teu/tua' — voice guide proibe em qualquer estrato. o dono usa 'vc'/'seu'." },
+  // NOTA: pronome (tu/você) NÃO entra aqui. É traço PESSOAL/REGIONAL de cada dono,
+  // não um fingerprint universal de IA — quem usa "tu" e quem usa "você" estão ambos certos.
+  // A escolha de pronome fica a cargo do voice_guide de cada instância (public.voice_guide),
+  // nunca hardcoded como regra global. (Regra "tu-pronome" removida em v3.0.2.)
   { id: "em-dash", pattern: /—/, severity: "high", message: "Detectado em-dash (—) — fingerprint de IA. Voice guide manda virgula, dois-pontos, parenteses ou '..'." },
   { id: "saudacao-generica", pattern: /(?:^|[\s,!?;:.])(ol[áa]|prezad[oa]|cordialmente|atenciosamente|esp[ée]ro que esteja bem)(?=$|[\s,!?;:.])/iu, severity: "high", message: "Detectada saudacao generica/formal. Voice guide manda 'Fala [Nome], beleza?' ou direto no assunto." },
   { id: "hype", pattern: /(?:^|[\s,!?;:.])(revolucion[áa]ri[oa]|transformador|disruptivo|game[- ]?changer|mindset|f[óo]rmula m[áa]gica)(?=$|[\s,!?;:.])/iu, severity: "high", message: "Detectado vocabulario de hype. Voice guide proibe — user posiciona com contencao." },
