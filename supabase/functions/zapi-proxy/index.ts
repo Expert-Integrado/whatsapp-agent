@@ -45,6 +45,7 @@ const READ_ACTIONS = new Set([
   "chats",
   "contacts",
   "get-contact-info",  // alias: edge converte pra GET /contacts/{phone}
+  "phone-exists",      // alias: edge converte pra GET /phone-exists/{phone} — devolve numero canonico + lid
 ]);
 
 const WRITE_ACTIONS = new Set([
@@ -284,6 +285,18 @@ Deno.serve(async (req) => {
       return json({ error: "params.phone obrigatorio em get-contact-info" }, 400);
     }
     resolvedAction = `contacts/${encodeURIComponent(String(params.phone))}`;
+    resolvedMethod = "GET";
+    resolvedParams = {};
+  }
+
+  // phone-exists: Z-API exige GET /phone-exists/{phone}, sem body.
+  // Resposta traz o numero CANONICO registrado no WhatsApp (campo phone) + lid —
+  // fonte de verdade pra normalizacao do 9o digito antes de primeiro contato.
+  if (action === "phone-exists") {
+    if (!params.phone) {
+      return json({ error: "params.phone obrigatorio em phone-exists" }, 400);
+    }
+    resolvedAction = `phone-exists/${encodeURIComponent(String(params.phone))}`;
     resolvedMethod = "GET";
     resolvedParams = {};
   }
