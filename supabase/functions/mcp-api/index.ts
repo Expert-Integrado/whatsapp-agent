@@ -61,9 +61,12 @@ function b64url(bytes: Uint8Array): string {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 function b64urlStr(s: string): string { return b64url(enc.encode(s)); }
-function b64urlToBytes(s: string): Uint8Array {
+function b64urlToBytes(s: string): Uint8Array<ArrayBuffer> {
   s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
-  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const bin = atob(s);
+  const out = new Uint8Array(new ArrayBuffer(bin.length));
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 async function hmacKey(secret: string): Promise<CryptoKey> {
   return await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
@@ -416,21 +419,129 @@ const HARD_RULES: { id: string; pattern: RegExp; severity: string; message: stri
   { id: "validacao-afetiva", pattern: /\b(te entendo|imagino como (voc[êe]|vc) (est[áa]|t[áa])|faz sentido (sua|tua) preocupa[çc][ãa]o|fica tranquil[oa] (que|q) vamos)\b/iu, severity: "high", message: "Detectada validacao afetiva. Voice guide regra hard: frontalidade nao inclui validar emocao — devolve pergunta de plano." },
   { id: "rsrs", pattern: /\brsrs\w*\b/iu, severity: "medium", message: "Detectado 'rsrs'. Voice guide aceita 'kkk' ou 'rs' solto fim-de-frase, mas nao 'rsrs'." },
 ];
-function checkVoiceViolations(content: string) {
+// Regras hard PESSOAIS do dono vem do banco (voice_guide.checks.hard_rules) como
+// regex serializada. Regex invalida e ignorada silenciosamente (nao derruba o check).
+function compileCustomRules(checks: any): { id: string; pattern: RegExp; severity: string; message: string }[] {
+  if (!Array.isArray(checks?.hard_rules)) return [];
+  const out: { id: string; pattern: RegExp; severity: string; message: string }[] = [];
+  for (const r of checks.hard_rules) {
+    if (!r?.id || !r?.pattern || !r?.message) continue;
+    try { out.push({ id: r.id, pattern: new RegExp(r.pattern, r.flags ?? "iu"), severity: r.severity ?? "medium", message: r.message }); } catch { /* regex invalida */ }
+  }
+  return out;
+}
+function checkVoiceViolations(content: string, customRules: { id: string; pattern: RegExp; severity: string; message: string }[] = []) {
   if (!content || typeof content !== "string") return [];
   const out: any[] = [];
-  for (const rule of HARD_RULES) {
+  for (const rule of [...HARD_RULES, ...customRules]) {
     const m = content.match(rule.pattern);
     if (m) out.push({ id: rule.id, severity: rule.severity, message: rule.message, match: m[0] });
   }
   return out;
 }
+
+// ─── Soft signals — fingerprints ESTRUTURAIS de simulacao (portado do mcp/voice-check.js v2.11) ───
+// Diferente das regras hard: nao aponta um match binario, mas um padrao estatistico
+// (msg-monolito, reticencias uniformes, cadeia de setas, caixa 100% minuscula, burst
+// inflado, assinaturas empilhadas). O MOTOR e generico e universal — a mensagem-chave
+// do blind test que originou isso: UNIFORMIDADE E FINGERPRINT (voz humana e distribuicao,
+// voz simulada e ponto fixo). Thresholds, assinaturas e mensagens calibradas com o corpus
+// do dono vem de voice_guide.checks.soft; defaults neutros abaixo. Sempre warning-only.
+const SOFT_DEFAULTS = {
+  signatures: [] as string[],
+  max_prose_chars: 250,
+  multiline_lines: 3,
+  multiline_chars: 200,
+  ellipsis_min_runs: 3,
+  arrows_min: 2,
+  lowercase_min_units: 3,
+  burst_max: 4,
+  messages: {} as Record<string, string>,
+};
+// URLs nao sao prosa: nao contam pra comprimento nem pra deteccao de setas.
+function stripUrls(s: string): string { return s.replace(/https?:\/\/\S+/g, ""); }
+function checkSoftSignals(content: string | string[], softCfg: any = null) {
+  const cfg = { ...SOFT_DEFAULTS, ...(softCfg ?? {}) };
+  const msg = (id: string, fallback: string) => cfg.messages?.[id] ?? fallback;
+  const warnings: any[] = [];
+  const isArray = Array.isArray(content);
+  const messages: any[] = isArray ? content : [content];
+
+  // Assinaturas fortes empilhadas (max 1 por resposta)
+  const joined = messages.filter((m) => typeof m === "string").join(" ").toLowerCase();
+  if (joined && Array.isArray(cfg.signatures) && cfg.signatures.length) {
+    const found = cfg.signatures.filter((sig: string) => joined.includes(String(sig).toLowerCase()));
+    if (found.length > 1) warnings.push({ id: "assinaturas-empilhadas", severity: "soft",
+      message: msg("assinaturas-empilhadas", `Detectadas ${found.length} assinaturas fortes empilhadas na mesma msg (${found.join(", ")}). Maximo 1 assinatura forte por resposta.`) });
+  }
+
+  for (const m of messages) {
+    if (typeof m !== "string") continue;
+    const semUrl = stripUrls(m);
+
+    // Msg-monolito: prosa real de chat e curta; conteudo longo vira burst de sends.
+    if (semUrl.length > cfg.max_prose_chars) warnings.push({ id: "msg-longa", severity: "soft",
+      message: msg("msg-longa", `Mensagem unica com ${semUrl.length} chars de prosa (fora URLs). Chat real fragmenta em sends separados — memo-monolito e fingerprint.`) });
+
+    const lines = m.split("\n").map((l: string) => l.trim()).filter(Boolean);
+    if (lines.length >= cfg.multiline_lines && semUrl.length > cfg.multiline_chars) warnings.push({ id: "bolha-multilinha", severity: "soft",
+      message: msg("bolha-multilinha", `Bolha unica com ${lines.length} linhas e ${semUrl.length} chars de prosa. Chat real prefere sends separados — considere fragmentar em burst.`) });
+
+    // Uniformidade de reticencias: humano MISTURA '..' e '...'; ponto fixo e simulacao.
+    // '…' unicode (autocorrect/IA) normalizado pra '...' — tambem conta como run.
+    const runs = m.replace(/…/g, "...").match(/\.{2,}/g) || [];
+    if (runs.length >= cfg.ellipsis_min_runs && new Set(runs.map((r: string) => r.length)).size === 1) {
+      warnings.push({ id: "uniformidade-reticencias", severity: "soft",
+        message: msg("uniformidade-reticencias", `${runs.length} reticencias todas do mesmo tamanho ('${runs[0]}'). Voz humana varia o tamanho das runs na mesma msg — uniformidade e fingerprint.`) });
+    }
+
+    // Cadeia de setas 'X > Y > Z' (estilo documentacao, ninguem digita assim em chat).
+    // Matching por linha (nao atravessa \n), ignora quote-reply ('>' no inicio),
+    // comparacao numerica ('> 5', '> R$') e setas dentro de URL (ja stripadas).
+    let setas = 0;
+    for (const line of semUrl.split("\n")) {
+      if (/^\s*>/.test(line)) continue;
+      setas += (line.match(/\S[ \t]*[>→»](?![ \t]*(?:\d|R\$|%))[ \t]*\S/g) || []).length;
+    }
+    if (setas >= cfg.arrows_min) warnings.push({ id: "cadeia-setas", severity: "soft",
+      message: msg("cadeia-setas", "Cadeia de setas 'X > Y > Z' detectada — estilo de documentacao. Passo-a-passo em chat se escreve corrido, ou vira audio/print.") });
+  }
+
+  // Caixa uniforme minuscula: vale pra linhas de uma bolha multi-linha E pra msgs de um burst.
+  const units: string[] = [];
+  for (const m of messages) {
+    if (typeof m !== "string") continue;
+    for (const line of m.split("\n")) { const t = line.trim(); if (t) units.push(t); }
+  }
+  const letterStarts = units.map((u) => (u.match(/^[A-Za-zÀ-ÖØ-öø-ÿ]/) || [null])[0]).filter(Boolean) as string[];
+  if (letterStarts.length >= cfg.lowercase_min_units && letterStarts.every((ch) => ch === ch.toLowerCase())) {
+    warnings.push({ id: "caixa-uniforme-minuscula", severity: "soft",
+      message: msg("caixa-uniforme-minuscula", `${letterStarts.length} linhas/msgs TODAS comecando minusculas. Alternar a caixa — 100% minusculo e tao fingerprint quanto 100% capitalizado.`) });
+  }
+
+  // Burst inflado — conta so mensagens reais (string nao-vazia).
+  const msgsReais = messages.filter((mm) => typeof mm === "string" && mm.trim().length > 0).length;
+  if (isArray && msgsReais > cfg.burst_max) warnings.push({ id: "burst-inflado", severity: "soft",
+    message: msg("burst-inflado", `Burst com ${msgsReais} mensagens. Chat real fragmenta em 2-${cfg.burst_max} — acima disso e inflado.`) });
+
+  return warnings;
+}
+
+// Score 0-10: 10 - 3*high - 1.5*medium - 0.5*low - 0.5*soft, floor em 0. Score < 7 = regenerar.
+function computeVoiceScore(violations: any[], softWarnings: any[]): number {
+  const weights: Record<string, number> = { high: 3, medium: 1.5, low: 0.5 };
+  let score = 10;
+  for (const v of violations) score -= weights[v.severity] ?? 0;
+  score -= 0.5 * softWarnings.length;
+  return Math.max(0, Math.round(score * 10) / 10);
+}
+
 async function loadVoiceGuide(instanceId?: string | null): Promise<any | null> {
   if (instanceId) {
-    const { data } = await supabase.from("voice_guide").select("content,instance_id,updated_at").eq("instance_id", instanceId).maybeSingle();
+    const { data } = await supabase.from("voice_guide").select("content,checks,instance_id,updated_at").eq("instance_id", instanceId).maybeSingle();
     if (data) return data;
   }
-  const { data } = await supabase.from("voice_guide").select("content,instance_id,updated_at").is("instance_id", null).maybeSingle();
+  const { data } = await supabase.from("voice_guide").select("content,checks,instance_id,updated_at").is("instance_id", null).maybeSingle();
   return data ?? null;
 }
 
@@ -932,8 +1043,32 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       }
 
       case "check_message": {
-        const violations = checkVoiceViolations(params.content);
-        return json({ ok: true, has_violations: violations.length > 0, violations_count: violations.length, violations, ...(violations.length ? { hint: "Use get_voice_guide pra ler o documento e reescrever respeitando as regras hard." } : { message: "Nenhuma violacao hard. Texto compativel com o voice guide." }) });
+        // content: string OU array de strings (burst) — o array habilita os sinais
+        // estruturais de conjunto (burst inflado, caixa uniforme cross-msgs).
+        const g = await loadVoiceGuide(params.instance ? await resolveInstanceKey(params.instance) : null);
+        const customRules = compileCustomRules(g?.checks);
+        const messages: any[] = Array.isArray(params.content) ? params.content : [params.content];
+        const violations: any[] = [];
+        const seen = new Set<string>();
+        for (const m of messages) {
+          for (const v of checkVoiceViolations(m, customRules)) {
+            const key = v.id + "|" + v.match;
+            if (!seen.has(key)) { seen.add(key); violations.push(v); }
+          }
+        }
+        const soft_warnings = checkSoftSignals(params.content, g?.checks?.soft);
+        const score = computeVoiceScore(violations, soft_warnings);
+        return json({
+          ok: true, score,
+          has_violations: violations.length > 0, violations_count: violations.length, violations,
+          soft_warnings_count: soft_warnings.length, soft_warnings,
+          ...(g?.checks ? {} : { note: "Calibracao pessoal (voice_guide.checks) nao configurada — rodando so regras universais com defaults neutros." }),
+          hint: score < 7
+            ? "Score abaixo de 7: regenere a mensagem. Use get_voice_guide pra ler o documento e reescrever respeitando as regras."
+            : (violations.length || soft_warnings.length)
+              ? "Score aceitavel, mas revise os warnings antes de enviar."
+              : "Nenhuma violacao. Texto compativel com o voice guide.",
+        });
       }
 
       case "setup_voice_guide": {
@@ -941,7 +1076,9 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         return json({
           ok: true,
           status: g ? "active" : "not_configured",
-          ...(g ? { scope: g.instance_id ?? "global", content_length: g.content.length, updated_at: g.updated_at } : { setup: "INSERT INTO voice_guide (content) VALUES ('<seu markdown>'); -- instance_id NULL = global" }),
+          ...(g ? { scope: g.instance_id ?? "global", content_length: g.content.length, updated_at: g.updated_at,
+                    checks_configured: !!g.checks, custom_hard_rules: compileCustomRules(g.checks).length }
+                : { setup: "INSERT INTO voice_guide (content) VALUES ('<seu markdown>'); -- instance_id NULL = global. Calibracao pessoal do check: coluna checks (ver 0032_voice_checks.sql)." }),
           hard_rules: HARD_RULES.map((r) => ({ id: r.id, severity: r.severity, message: r.message })),
         });
       }
@@ -1279,10 +1416,16 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "check_message",
-    description: "Verifica se um texto viola alguma regra hard do voice guide (tu/teu, em-dash, hype, saudacoes genericas, validacao afetiva, etc). Warning, nao bloqueio — use antes de send pra revisar drafts.",
+    description: "Verifica um draft contra o voice guide: regras hard (universais + pessoais do banco), sinais estruturais anti-uniformidade (msg-monolito, reticencias uniformes, cadeia de setas, caixa 100% minuscula, burst inflado) e score 0-10 (abaixo de 7 = regenerar). Warning, nao bloqueio — use antes de send pra revisar drafts. Aceita string ou array de strings (burst).",
     inputSchema: {
       type: "object",
-      properties: { content: { type: "string", description: "Texto a verificar" } },
+      properties: {
+        content: {
+          description: "Texto a verificar — string unica ou array de strings (burst de sends)",
+          anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+        },
+        instance: { type: "string", description: "Instancia (opcional) — usa a calibracao pessoal dela se houver" },
+      },
       required: ["content"],
       additionalProperties: false,
     },
