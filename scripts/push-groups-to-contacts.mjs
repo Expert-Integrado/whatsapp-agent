@@ -41,6 +41,7 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || dotenv.SUPABASE_SE
 
 function syncToken() {
   if (process.env.WHATSAPP_SYNC_TOKEN) return process.env.WHATSAPP_SYNC_TOKEN;
+  if (dotenv.WHATSAPP_SYNC_TOKEN) return dotenv.WHATSAPP_SYNC_TOKEN;
   try {
     return execFileSync('op', ['read', 'op://Agentes Eric/WHATSAPP_SYNC_TOKEN/credential'], { encoding: 'utf8' }).trim();
   } catch {
