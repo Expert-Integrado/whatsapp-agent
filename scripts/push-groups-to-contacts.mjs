@@ -76,7 +76,9 @@ async function worker(path, opts = {}) {
 }
 
 // --- fluxo ---
-const chats = await sb('chats?is_group=eq.true&is_announcement=eq.false&select=chat_id,chat_name,member_count&order=chat_name');
+// Recorte por RECÊNCIA: o catálogo do painel mostra os 500 grupos com mensagem
+// mais recente (cap do worker) — grupo morto há meses não ocupa vaga na lista.
+const chats = await sb('chats?is_group=eq.true&is_announcement=eq.false&select=chat_id,chat_name,member_count&order=last_message_at.desc.nullslast&limit=500');
 const groups = chats
   .filter((c) => c.chat_id && c.chat_name)
   .map((c) => ({ chat_id: c.chat_id, name: c.chat_name, member_count: c.member_count ?? null }));
