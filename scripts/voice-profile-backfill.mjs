@@ -2,8 +2,14 @@
 // Backfill do VOICE PROFILE por contato (skills/voice-profile-backfill).
 //
 //   node scripts/voice-profile-backfill.mjs corpus --instance pessoal [--limit 50]
-//        [--min-messages 5] [--force] [--out <dir>]
+//        [--min-messages 5] [--before <ISO>] [--force] [--out <dir>]
 //   node scripts/voice-profile-backfill.mjs commit --file perfis.json [--force]
+//
+// Varredura completa (missão "de fora a fora"): rodadas com --before <cursor>.
+// Cada rodada processa OS PRÓXIMOS N chats por recência (inclusive os que acabam
+// pulados por falta de evidência — eles não travam a fila) e imprime no stderr o
+// next_before da rodada seguinte + se exauriu. Contato com DM fraca mas presença
+// relevante em grupos entra mesmo assim (dm_thin: true — pedido do dono 09/07).
 //
 // `corpus` monta, por contato com conversa PRIVADA, o material bruto pra sessão do
 // agente extrair: como a pessoa chama o dono (vocativo => intimidade) + gírias/registro.
@@ -40,6 +46,7 @@ const MSG_CAP = parseInt(process.env.VP_MSG_CAP || '150', 10);
 const VOC_CAP = parseInt(process.env.VP_VOC_CAP || '30', 10);
 const GROUP_CAP = parseInt(process.env.VP_GROUP_CAP || '100', 10);
 const GROUP_KEEP = 40;
+const GROUP_RESCUE_MIN = parseInt(process.env.VP_GROUP_RESCUE_MIN || '8', 10); // DM fraca + >=N falas em grupo = entra mesmo assim
 const CONTENT_MAX = 300;
 const MIN_MESSAGES = parseInt(argOf('--min-messages') || '5', 10);
 const BATCH_SIZE = 10;
@@ -127,13 +134,20 @@ async function corpus() {
 
   // Contatos-alvo: DMs numéricas, sem perfil ainda (idempotência de re-run), por recência.
   // Chats fantasma @lid ficam de fora como ALVO (entram como fonte via lid_mapping).
+  // --before <ISO> pagina a varredura: processa os PRÓXIMOS N por recência e reporta
+  // o cursor da rodada seguinte — quem for pulado não trava a fila.
+  const before = argOf('--before');
   const vpFilter = hasFlag('--force') ? '' : '&voice_profile=is.null';
+  const beforeFilter = before ? `&last_message_at=lt.${encodeURIComponent(before)}` : '';
   const targetsRaw = await sb(
     `chats?select=instance_id,chat_id,chat_name,phone,last_message_at` +
     `&instance_id=eq.${encodeURIComponent(INST)}` +
-    `&is_group=eq.false&is_announcement=eq.false&is_community=eq.false${vpFilter}` +
-    `&order=last_message_at.desc.nullslast&limit=${CONTACT_CAP * 2}`
+    `&is_group=eq.false&is_announcement=eq.false&is_community=eq.false${vpFilter}${beforeFilter}` +
+    `&order=last_message_at.desc.nullslast&limit=${CONTACT_CAP}`
   );
+  const exhausted = targetsRaw.length < CONTACT_CAP;
+  const tsSeen = targetsRaw.map((c) => c.last_message_at).filter(Boolean).sort();
+  const nextBefore = tsSeen[0] ?? null; // null = só sobrou chat sem last_message_at (fim da fila)
   const numeric = targetsRaw.filter((c) => /^\d+$/.test(c.chat_id));
   const skippedNonNumeric = targetsRaw.length - numeric.length;
 
@@ -147,7 +161,6 @@ async function corpus() {
     const folded = numeric.filter((o) => o.chat_id !== c.chat_id && variants.includes(o.chat_id));
     folded.forEach((o) => consumed.add(o.chat_id));
     targets.push({ ...c, variants, folded_chat_ids: folded.map((o) => o.chat_id) });
-    if (targets.length >= CONTACT_CAP) break;
   }
 
   // lid_mapping uma vez: phone -> lids (chats fantasma @lid do mesmo número)
@@ -180,7 +193,7 @@ async function corpus() {
       .filter((m) => isUseful(m._m, m.text))
       .map(({ _m, ...m }) => m)
       .reverse();
-    if (dmMsgs.length < MIN_MESSAGES) { skippedFewMsgs++; continue; }
+    const dmThin = dmMsgs.length < MIN_MESSAGES;
 
     // Varredura longitudinal de vocativos (asc: pega apelido antigo fora da janela recente)
     const orVoc = encodeURIComponent(`(${VOCATIVE_PATTERNS.map((p) => `content.ilike.*${p}*`).join(',')})`);
@@ -228,18 +241,22 @@ async function corpus() {
       .sort((a, b) => (b.reply_to_me - a.reply_to_me) || (vocRe.test(b.text) - vocRe.test(a.text)) || (a.ts < b.ts ? 1 : -1))
       .slice(0, GROUP_KEEP);
 
+    // DM fraca: só entra se tiver presença relevante em grupos (resgate por grupo).
+    if (dmThin && groupMsgs.length < GROUP_RESCUE_MIN) { skippedFewMsgs++; continue; }
+
     contacts.push({
       instance_id: INST,
       chat_id: t.chat_id,
       chat_name: t.chat_name,
       phone_variants: t.variants,
       folded_chat_ids: t.folded_chat_ids,
+      dm_thin: dmThin,
       dm_msgs: dmMsgs,
       vocative_hits: vocativeHits,
       group_msgs: groupMsgs,
       stats: { dm_fetched: dmRaw.length, dm_kept: dmMsgs.length, dm_truncated: dmRaw.length === MSG_CAP, group_kept: groupMsgs.length },
     });
-    console.error(`corpus: ${t.chat_name || t.chat_id} — ${dmMsgs.length} DM, ${vocativeHits.length} vocativo-hit, ${groupMsgs.length} grupo`);
+    console.error(`corpus: ${t.chat_name || t.chat_id} — ${dmMsgs.length} DM${dmThin ? ' (fraca, resgate por grupo)' : ''}, ${vocativeHits.length} vocativo-hit, ${groupMsgs.length} grupo`);
   }
 
   const files = [];
@@ -251,8 +268,9 @@ async function corpus() {
   }
   console.error(
     `corpus: ${contacts.length} contato(s) em ${files.length} batch(es) → ${outDir}\n` +
-    `pulados: ${skippedFewMsgs} com menos de ${MIN_MESSAGES} msgs úteis, ${skippedNonNumeric} chat_id não-numérico.\n` +
-    `restam mais alvos? re-rodar corpus (o filtro voice_profile=is.null continua de onde parou após o commit).`
+    `pulados: ${skippedFewMsgs} sem evidência (DM fraca e sem resgate por grupo), ${skippedNonNumeric} chat_id não-numérico.\n` +
+    `CURSOR: next_before=${nextBefore ?? 'FIM'} exhausted=${exhausted}` +
+    (exhausted ? ' — fila varrida até o fim.' : ' — próxima rodada: --before nesse valor.')
   );
 }
 
