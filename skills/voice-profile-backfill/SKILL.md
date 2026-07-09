@@ -1,13 +1,14 @@
 ---
 name: voice-profile-backfill
-description: Backfill do perfil de voz por contato (chats.voice_profile) a partir do histórico do WhatsApp. Varre DMs e grupos de cada contato, extrai como a pessoa chama o dono (vocativo => nível de intimidade) + gírias/registro dela, e grava o perfil que o agente espelha ao redigir (somado ao voice guide global). TRIGGER quando o dono pedir "roda o backfill de voice profile", "captura como cada um me chama", "perfil de linguagem dos contatos". NÃO dispara pra atualizar o perfil de UM contato (isso é annotate_chat direto com voice_profile), nem pra mexer no voice guide global.
+description: Backfill do perfil de voz por contato (chats.voice_profile) a partir do histórico do WhatsApp. Varre DMs e grupos de cada contato, extrai como a pessoa chama o dono (vocativo => nível de intimidade) + gírias/registro dela + como o dono chama a pessoa (como_chamo, só de mensagem autêntica do dono), e grava o perfil que o agente espelha ao redigir (somado ao voice guide global). TRIGGER quando o dono pedir "roda o backfill de voice profile", "captura como cada um me chama", "perfil de linguagem dos contatos". NÃO dispara pra atualizar o perfil de UM contato (isso é annotate_chat direto com voice_profile), nem pra mexer no voice guide global.
 ---
 
 # Backfill do voice profile por contato
 
 Transforma histórico em espelhamento: o jeito que CADA pessoa fala com o dono (como o
-chama, gírias, registro) vira `chats.voice_profile`, que o `read` devolve e o agente
-espelha ao redigir — por cima do voice guide global, nunca no lugar dele.
+chama, gírias, registro) E o jeito que o dono fala com ela (`como_chamo`) viram
+`chats.voice_profile`, que o `read` devolve e o agente espelha ao redigir — por cima
+do voice guide global, nunca no lugar dele.
 
 ## SEMPRE
 
@@ -15,6 +16,9 @@ espelha ao redigir — por cima do voice guide global, nunca no lugar dele.
 - `como_me_chama` só com vocativo LITERAL dirigido ao dono. Em grupo, só mensagem com
   `reply_to_me: true` ou menção explícita ao dono conta como evidência de vocativo.
 - Gíria só com 2+ ocorrências (termo distintivo da pessoa, não português coloquial comum).
+- `como_chamo` SÓ de `owner_msgs`/`owner_vocative_hits` do corpus (mensagens autênticas
+  do dono: `sent_by_agent=false`, e histórico sem `fromApi` só antes de 15/04/2026 —
+  o script já filtra). Texto de agente NUNCA ensina a voz do dono.
 - Contato sem evidência suficiente: NÃO emitir perfil (fica NULL, re-analisável depois).
 - Piloto antes do run completo: 10 contatos, revisão do dono, só então o resto.
 - Commit gravando com `fonte: 'backfill'`; perfil existente com `fonte: 'manual'` é
@@ -43,7 +47,8 @@ Piloto = `--limit 10`. Run completo = rodadas de `--limit 50`; o filtro
 `voice_profile=is.null` faz cada rodada continuar de onde a anterior parou (após o
 commit). Read-only. Cada batch JSON traz, por contato: `chat_id`, `chat_name`,
 `dm_msgs` (inbound, transcrição de áudio incluída), `vocative_hits` (varredura
-longitudinal — pega apelido antigo), `group_msgs` (com flag `reply_to_me`) e `stats`.
+longitudinal — pega apelido antigo), `owner_msgs` + `owner_vocative_hits` (outbound
+AUTÊNTICO do dono, pra `como_chamo`), `group_msgs` (com flag `reply_to_me`) e `stats`.
 
 ## Passo 2 — Analisar (1 subagente por batch)
 
@@ -52,6 +57,7 @@ Pra cada contato do batch, extrair:
 | Campo | Regra |
 |---|---|
 | `como_me_chama` | vocativos literais dirigidos ao dono (ex: `["mano", "irmão"]`); em grupo, só com `reply_to_me` ou menção explícita |
+| `como_chamo` | vocativos literais que o DONO usa com a pessoa (ex: `["mano", "Jão"]`), extraídos SÓ de `owner_msgs`/`owner_vocative_hits` |
 | `girias` | até 10 termos distintivos com 2+ ocorrências (ex: `["top demais", "dale"]`) |
 | `registro` | 1 linha (ex: "informal-íntimo, zoa, manda áudio longo") |
 | `exemplos` | 2-3 citações literais ≤80 chars que mostram o tom |
@@ -63,7 +69,7 @@ Na dúvida entre registrar e pular, pular (perfil ruim é pior que perfil nenhum
 Consolidar tudo em `perfis.json`:
 
 ```json
-[{ "instance_id": "...", "chat_id": "5511...", "voice_profile": { "como_me_chama": ["mano"], "girias": ["dale"], "registro": "...", "exemplos": ["..."], "confianca": "alta", "fonte": "backfill" } }]
+[{ "instance_id": "...", "chat_id": "5511...", "voice_profile": { "como_me_chama": ["mano"], "como_chamo": ["Jão"], "girias": ["dale"], "registro": "...", "exemplos": ["..."], "confianca": "alta", "fonte": "backfill" } }]
 ```
 
 ## Passo 3 — Revisão do dono (gate)

@@ -331,6 +331,10 @@ async function handleReceived(p: any) {
     chat_id: chatId,
     direction: p.fromMe ? "sent" : "received",
     from_me: !!p.fromMe,
+    // fromApi=true = disparo via API que NAO passou pela edge send-message (ela
+    // insere primeiro com sent_by_agent+nome e este insert vira duplicata 23505).
+    // Sem isso, disparo de API direto (zapi_action etc) ficava logado como "dono".
+    sent_by_agent: !!p.fromApi,
     sender_phone: senderPhone,
     sender_name: p.senderName ?? null,
     message_type: messageType,
