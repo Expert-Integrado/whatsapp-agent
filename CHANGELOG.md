@@ -2,6 +2,21 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [3.3.0] — 2026-07-09
+
+Personalização por contato + página pública do projeto. Consolida o que entrou pela PR #5 (nunca documentado no changelog) e as adições do dia.
+
+### Added
+- **`chats.voice_profile` (perfil de voz por contato)** — como a pessoa chama o dono (`como_me_chama`), como o dono a chama (`como_chamo`, extraído só de mensagem autêntica do dono), gírias, registro da relação, exemplos e confiança. O `read` devolve o perfil e instrui o agente a **espelhar** ao redigir (por cima do voice guide global); o `annotate_chat` faz merge raso pra captura incremental (`fonte:'incremental'`); `fonte:'manual'` é intocável pra rotinas automáticas. Migrations `0035`/`0038`.
+- **`chats.brain_contact_id` (vínculo com vault de contatos)** — link direto por ID pro contato no vault externo (expert-contacts): o agente encontra a pessoa sem depender de busca por telefone. Devolvido no `read`, gravado/desvinculado via `annotate_chat`. Migration `0036`.
+- **Skill `voice-profile-backfill`** — varre o histórico (DMs + resgate por grupos + outbound autêntico do dono) e grava os perfis em lote, com piloto revisável. Inclui **modo `--nutricao`**: delta semanal (contatos novos com atividade + perfis defasados com mensagens novas, que o analista atualiza a partir do `current_profile`) — rotina local recomendada de 1x/semana, documentada no README.
+- **Auditoria de disparo (`sent_by_agent`)** — mensagens enviadas por agente marcadas na origem (`fromApi` do webhook coberto pela migration `0037`); é o que garante que `como_chamo` aprende só com a voz real do dono.
+- **Página pública do projeto (GitHub Pages)** — `docs/index.html` servido em <https://expert-integrado.github.io/whatsapp-agent/>: o que é, como funciona, as 22 tools, voz, provedores, segurança e instalação, com branding Expert Integrado fixo e og:image pra preview em redes sociais.
+
+### Fixed
+- **Timeout 57014 no backfill em chats gigantes** — `chat_id=in.(...)` com `order`+`limit` fazia o planner abandonar o índice composto; consultas agora são por chat (`eq.`) com merge no cliente (`sbPerChat`).
+- **`voice-profile-backfill` resiliente ao rename da 0040** — tenta `wa_instance` e cai pra `zapi_instance` em banco ainda não migrado.
+
 ## [3.2.0] — 2026-07-09
 
 ### Added
