@@ -341,7 +341,10 @@ async function handleReceived(p: any) {
     content,
     caption,
     raw_type_hint: rawTypeHint,
-    quoted_msg_id: p.referencedMessage?.messageId ?? null,
+    // Z-API manda a referência do reply como referenceMessageId (string no topo);
+    // o shape antigo referencedMessage.messageId nunca apareceu em prod (1,19M
+    // msgs, 0 hits — verificado 09/07/2026), fica como fallback defensivo.
+    quoted_msg_id: p.referenceMessageId ?? p.referencedMessage?.messageId ?? null,
     is_forwarded: !!p.forwarded,
     message_ts: new Date(p.momment ?? Date.now()).toISOString(),
     raw_payload: rawPayload,
