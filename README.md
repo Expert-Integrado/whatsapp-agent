@@ -1,6 +1,6 @@
 # WhatsApp Agent
 
-**v2.2.1** · [Changelog](CHANGELOG.md) · [Guia de migração v1 → v2](MIGRATION.md)
+**v3.0.0** · [Changelog](CHANGELOG.md) · [Guia de migração](MIGRATION.md) · [Documentação de referência](docs/reference/)
 
 **Seu WhatsApp, operado por IA.** Um backend headless que conecta o seu número de WhatsApp ao Claude — que lê, resume, transcreve áudios, categoriza contatos e responde por você, tudo em linguagem natural.
 
@@ -26,7 +26,7 @@ Três contas — todas com plano gratuito suficiente pra começar:
 | Serviço | Pra quê | O que você vai precisar |
 |---|---|---|
 | **[Supabase](https://supabase.com)** | Banco, storage e edge functions | Project ref + URL, a **secret key** (`sb_secret_…`) e um Personal Access Token (PAT) |
-| **[Z-API](https://z-api.io)** | Gateway do WhatsApp | `instance_id`, `token`, `client_token` — e o seu número conectado via QR code |
+| **[Z-API](https://z-api.io)** (ou Evolution API) | Gateway do WhatsApp | Z-API: `instance_id`, `auth_token`, `client_token` — e o seu número conectado via QR code. Evolution: URL do seu servidor + API key. Veja [Provedores de WhatsApp](#provedores-de-whatsapp-z-api-vs-evolution-api). |
 | **[OpenAI](https://platform.openai.com)** | Transcrição de áudio (Whisper) | API key |
 
 Ferramentas locais: **[Claude Desktop](https://claude.ai/download)** (Claude Code embutido, na aba **Code**) e o **[Supabase CLI](https://supabase.com/docs/guides/cli)** (o setup instala se faltar — instruções por OS na skill `setup`). **Não precisa de Node** — o runtime mora no Supabase.
@@ -80,25 +80,43 @@ Como são **ferramentas MCP** (não skills), funcionam igual em qualquer app de 
 
 ---
 
+## Provedores de WhatsApp (Z-API vs Evolution API)
+
+A partir da v3.0, cada instância WhatsApp escolhe o provedor no campo `provider` da tabela `wa_instance`. Os dois são suportados simultaneamente no mesmo banco.
+
+| | Z-API | Evolution API |
+|---|---|---|
+| Hospedagem | Hospedado (SaaS) | Self-hosted (você sobe o servidor) |
+| Custo | Pago (plano Z-API) | Open-source, gratuito |
+| Pré-requisito | Conta em [z-api.io](https://z-api.io) | Servidor Evolution rodando + URL acessível |
+| Configuração | `instance_id`, `auth_token`, `client_token` | `base_url` do servidor, `auth_token` (API key) |
+| Quando usar | Padrão recomendado — sem infra extra | Quando você já tem (ou quer) seu próprio servidor Evolution |
+
+**Instâncias existentes (migradas da v2.x)** continuam funcionando como Z-API sem nenhuma reconfiguração.
+
+Para adicionar uma instância **Evolution API**, insira uma linha em `wa_instance` com `provider = 'evolution'` e o `base_url` do seu servidor. A skill `/setup` conduz o processo — veja [`.claude/skills/setup`](.claude/skills/setup/SKILL.md).
+
+---
+
 ## Arquitetura
 
 ```mermaid
 flowchart LR
-    ZAPI["Z-API · WhatsApp"] -->|webhook| PW["process-webhook<br/>(Edge Function)"]
+    WA["Provedor WhatsApp<br/>(Z-API ou Evolution API)"] -->|webhook| PW["process-webhook<br/>(Edge Function)"]
     PW -->|grava msgs + mídia| SB[("Supabase<br/>DB + Storage")]
     TQ["transcribe-queue<br/>(pg_cron 2 min · Whisper)"] <-->|transcreve áudios| SB
     SB <--> MCP["mcp-api<br/>(MCP-over-HTTP · Edge Function)"]
     MCP <-->|x-mcp-key / OAuth| H["Claude<br/>(Code · Desktop · Web)"]
-    MCP -->|send · react| ZAPI
+    MCP -->|send · react| WA
 ```
 
 Três serviços, com o Supabase como **runtime**:
 
-- **Z-API** — gateway do WhatsApp. Recebe as suas mensagens (webhook → `process-webhook`) e envia as respostas.
-- **Supabase** — o coração **e o runtime**. Postgres (mensagens, chats, contatos, categorias), Storage (6 buckets de mídia), Edge Functions (Deno) e `pg_cron` (transcrição a cada 2 min, limpeza). Entre as functions está a **`mcp-api`: o MCP server falando HTTP** — é ela que expõe as ~20 tools. 27 migrations versionadas.
+- **Provedor WhatsApp** — gateway do WhatsApp. Pode ser **Z-API** (hospedado, pago) ou **Evolution API** (self-hosted, open-source), selecionável por instância. Recebe as suas mensagens (webhook → `process-webhook`) e envia as respostas via `wa-proxy`.
+- **Supabase** — o coração **e o runtime**. Postgres (mensagens, chats, contatos, categorias), Storage (6 buckets de mídia), Edge Functions (Deno) e `pg_cron` (transcrição a cada 2 min, limpeza). Entre as functions está a **`mcp-api`: o MCP server falando HTTP** — é ela que expõe as ~20 tools. 31 migrations versionadas.
 - **OpenAI** — Whisper, pra transcrever os áudios.
 - **Harness** — qualquer Claude (Code, Desktop ou Web) conecta na `mcp-api`. O Claude Code usa **`x-mcp-key`**; o chat do Desktop/Web usa **OAuth** (a própria `mcp-api` é o Authorization Server — confidential client + PKCE, auto-aprovado, sem tela). Não há processo local: o MCP roda no Supabase.
 
-**Fluxo:** a mensagem chega na Z-API → `process-webhook` grava no Supabase (24/7) → o cron transcreve os áudios → você opera conversando com o Claude, que fala com a `mcp-api` (HTTP), que lê o banco e responde pelo seu WhatsApp.
+**Fluxo:** a mensagem chega no provedor (Z-API ou Evolution) → `process-webhook` grava no Supabase (24/7) → o cron transcreve os áudios → você opera conversando com o Claude, que fala com a `mcp-api` (HTTP), que lê o banco e responde pelo seu WhatsApp.
 
 > Single-tenant por design: rode a sua própria instância Z-API e projeto Supabase. A `service_role`/secret key (que bypassa o RLS) vive só server-side — nos secrets das Edge Functions — nunca no repositório. O acesso ao MCP é protegido pela `MCP_API_KEY` (header `x-mcp-key`).

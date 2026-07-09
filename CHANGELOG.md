@@ -2,6 +2,27 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [3.2.0] — 2026-07-09
+
+### Added
+- **Suporte multi-provider** — cada instância WhatsApp escolhe o provedor no campo `provider`: `'zapi'` (Z-API, hospedado/pago, padrão) ou `'evolution'` (Evolution API, open-source/self-hosted). A seleção é por instância; é possível misturar provedores no mesmo banco.
+- **Abstração neutra `WaProvider`** — adapters intercambiáveis por trás das Edge Functions; cada adapter implementa envio, mídia, grupos e webhook de forma independente. Adicionar provedores futuros não exige tocar no código de negócio.
+- **`wa-proxy`** — substitui a `zapi-proxy`; roteamento automático para o adapter correto conforme o `provider` da instância.
+- **Evolution: `send-poll`, `get-contact-info`, `contacts` e `phone-exists`** no `buildAction` — enquetes, perfil de contato, listagem de contatos e verificação de número canônico (9º dígito) funcionais nos dois providers. `forward` permanece exclusivo Z-API (Evolution v2.3 não tem endpoint de encaminhamento).
+- Collections Postman de referência (Z-API e Evolution v2.3) em `docs/`.
+
+### Changed
+- **Breaking interno — tabelas renomeadas:** `zapi_instance` → `wa_instance`, `zapi_action_log` → `wa_action_log`, coluna `token` → `auth_token`. Views de compatibilidade `zapi_instance`/`zapi_action_log` criadas como shims de depreciação — serão removidas numa versão futura.
+- Upgrade automático via `supabase db push` (migration `0040_provider_neutralization`): instâncias existentes recebem `provider = 'zapi'` sem intervenção manual; nenhum dado é apagado (rename, não drop).
+
+### Deprecated
+- Views de compatibilidade `zapi_instance` e `zapi_action_log` — use `wa_instance` e `wa_action_log` diretamente. As views serão removidas numa versão futura.
+- Edge Function `zapi-proxy` — substituída por `wa-proxy`; pode ser removida com `supabase functions delete zapi-proxy` após o deploy.
+
+### Notes
+- **Usuários Z-API: nenhuma reconfiguração necessária.** Credenciais e instâncias são preservadas; o comportamento é idêntico ao da v2.x.
+- Guia de upgrade completo: [`MIGRATION.md`](MIGRATION.md) — seção "Upgrade para v3.0 (multi-provider)".
+
 ## [3.1.0] — 2026-07-06
 
 Fix do bug de envio pra chat novo que engolia mensagens (ClickUp 86ajby187). A causa raiz **não era o remap de LID**: era o **9º dígito BR**. Contas antigas são registradas no WhatsApp sem o 9 — enviar pro número com 9 criava um **chat fantasma** (a 1ª mensagem chegava via remap do WhatsApp, as seguintes morriam no órfão e a Z-API seguia respondendo 200).

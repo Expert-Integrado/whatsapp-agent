@@ -1,0 +1,19 @@
+{
+  "type": "ReceivedCallback",
+  "instanceId": "INST123",
+  "messageId": "3EB0A1234567890ABCE0",
+  "phone": "5511999991234",
+  "senderName": "John Doe",
+  "momment": 1720000003000,
+  "fromMe": false,
+  "waitingMessage": false,
+  "isGroup": false,
+  "isCommunity": false,
+  "reaction": {
+    "value": "👍",
+    "time": 1720000003,
+    "referencedMessage": {
+      "messageId": "3EB0A1234567890ABCDE"
+    }
+  }
+}

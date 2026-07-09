@@ -1,4 +1,11 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import {
+  getProvider,
+  type InboundEvent,
+  type InstanceCreds,
+  type MediaRef,
+} from "../_shared/wa/index.ts";
+import type { WaProvider } from "../_shared/wa/provider.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -10,145 +17,42 @@ const cors = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// Valida o header `z-api-token` contra o secret ZAPI_WEBHOOK_TOKEN.
+// Auth do webhook — SENHA POR INSTANCIA (multi-instancia / multi-provider).
 //
 // Z-API envia o webhook-token (configurado no painel da instancia, separado do
 // Client-Token usado em chamadas API) no header `z-api-token`. Capturado em
 // 2026-05-02 via debug temporario — exemplo: "1F80DD47AE40B88186F0D417".
 //
-// IMPORTANTE: o Client-Token da `zapi_instance.client_token` (usado em send-*)
+// IMPORTANTE: o Client-Token da `wa_instance.client_token` (usado em send-*)
 // NAO e o mesmo token enviado em webhooks. Sao dois tokens distintos, ambos
-// gerenciados pela Z-API.
+// gerenciados pela Z-API. A verificacao em si vive no adapter
+// (provider.verifyWebhookAuth, PURO); o gate WEBHOOK_REQUIRE_AUTH + o TOFU
+// (aprender o token na 1a request) ficam AQUI no orquestrador pois envolvem I/O.
 const REQUIRE_AUTH = Deno.env.get("WEBHOOK_REQUIRE_AUTH") === "true";
 const ZAPI_WEBHOOK_TOKEN = Deno.env.get("ZAPI_WEBHOOK_TOKEN") ?? "";
 
 // DEBUG TEMPORARIO: quando true, anexa todos os headers da requisicao em
-// webhook_events_raw.payload._debug_headers pra investigar o que Z-API
+// webhook_events_raw.payload._debug_headers pra investigar o que o provider
 // realmente envia. Desligar (false) apos identificar o header de auth correto.
 const DEBUG_HEADERS = Deno.env.get("WEBHOOK_DEBUG_HEADERS") === "true";
 
-// Credenciais Z-API vêm da tabela zapi_instance (centralizado no item 8.1).
-// Env vars ZAPI_INSTANCE_ID/TOKEN/CLIENT_TOKEN foram removidas de todas as máquinas.
+// Credenciais vêm da tabela wa_instance (migration 0040 renomeou zapi_instance).
 
-// ─── Resolução de instância (multi-instância) ────────────────────────────────
-// O payload Z-API traz p.instanceId em todo evento. Mapeamos pro instance_id
-// canônico da tabela zapi_instance (cache em memória do isolate). Fallback
-// 'unknown' (não-nulo) pra nunca perder mensagem nem furar UNIQUE composto.
-const _instCache = new Map<string, string>();
-const FALLBACK_INSTANCE = "unknown";
+// Colunas que o orquestrador lê de wa_instance pra montar InstanceCreds + auth.
+const CREDS_COLUMNS =
+  "provider, instance_id, base_url, auth_token, client_token, alias, webhook_token";
 
-async function resolveInstance(p: any): Promise<string> {
-  const raw = typeof p?.instanceId === "string" ? p.instanceId : null;
-  if (!raw) return FALLBACK_INSTANCE;
-  if (_instCache.has(raw)) return _instCache.get(raw)!;
-  const { data } = await supabase
-    .from("zapi_instance")
-    .select("instance_id")
-    .eq("instance_id", raw)
-    .maybeSingle();
-  const resolved = data?.instance_id ?? FALLBACK_INSTANCE;
-  if (resolved === FALLBACK_INSTANCE) {
-    console.warn("WEBHOOK: instanceId desconhecido", raw, "type", p?.type);
-    // TODO Fase 7: disparar alerta Telegram em instância desconhecida.
-  }
-  _instCache.set(raw, resolved);
-  return resolved;
-}
+// creds carrega webhook_token alem dos campos de InstanceCreds (usado no TOFU/auth).
+type CredsRow = InstanceCreds & { webhook_token?: string | null };
 
-function isLid(s: unknown): s is string {
-  return typeof s === "string" && s.endsWith("@lid");
-}
+// Providers registrados, em ordem de tentativa de match do webhook.
+const PROVIDERS: WaProvider[] = [getProvider("zapi"), getProvider("evolution")];
 
-/**
- * Tenta resolver um LID @lid pro phone numerico real, em 3 camadas:
- *   1. Cache em lid_mapping (resolved_via='cache' apos 1a resolucao)
- *   2. Match por chat_name -> chat numerico mais recente (resolved_via='chat_name')
- *   3. Z-API GET /contacts/<lid> (resolved_via='zapi')
- * Retorna {phone:null, via:'unresolved'} se as 3 camadas falham.
- */
-async function resolveLidToPhone(
-  lid: string,
-  chatName: string | null,
-  instanceId: string,
-): Promise<{ phone: string | null; via: string }> {
-  // 1. Cache (escopado por instância — o espaço de LID é por número do dono)
-  const { data: cached } = await supabase
-    .from("lid_mapping")
-    .select("phone")
-    .eq("instance_id", instanceId)
-    .eq("lid", lid)
-    .maybeSingle();
-  if (cached?.phone) return { phone: cached.phone, via: "cache" };
-
-  // 2. Match pelo chat_name -> chat numerico mais recente (DA MESMA instância)
-  if (chatName) {
-    const { data: existing } = await supabase
-      .from("chats")
-      .select("chat_id")
-      .eq("instance_id", instanceId)
-      .eq("chat_name", chatName)
-      .not("chat_id", "like", "%@lid")
-      .not("chat_id", "like", "%-group")
-      .not("chat_id", "like", "%@g.us")
-      .order("last_message_at", { ascending: false, nullsFirst: false })
-      .limit(1);
-    const cid = existing?.[0]?.chat_id;
-    if (cid && /^\d+$/.test(cid)) {
-      await supabase
-        .from("lid_mapping")
-        .upsert({ instance_id: instanceId, lid, phone: cid, chat_name: chatName, resolved_via: "chat_name" });
-      return { phone: cid, via: "chat_name" };
-    }
-  }
-
-  // 3. Z-API contacts endpoint — credenciais da instância CORRETA
-  try {
-    const { data: inst } = await supabase
-      .from("zapi_instance")
-      .select("instance_id, token, client_token")
-      .eq("instance_id", instanceId)
-      .maybeSingle();
-    if (inst) {
-      const r = await fetch(
-        `https://api.z-api.io/instances/${inst.instance_id}/token/${inst.token}/contacts/${encodeURIComponent(lid)}`,
-        { headers: { "Client-Token": inst.client_token } },
-      );
-      if (r.ok) {
-        const j = await r.json();
-        const resolved = j?.phone ?? j?.contact?.phone ?? null;
-        if (resolved && /^\d+$/.test(String(resolved))) {
-          await supabase.from("lid_mapping").upsert({
-            instance_id: instanceId,
-            lid,
-            phone: String(resolved),
-            chat_name: chatName,
-            resolved_via: "zapi",
-          });
-          return { phone: String(resolved), via: "zapi" };
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("zapi resolve fail", lid, e);
-  }
-
-  return { phone: null, via: "unresolved" };
-}
-
-/**
- * Resolve o chat_id efetivo de um payload Z-API.
- * Caso comum: retorna p.phone direto. Caso fromMe=true && phone=@lid (msg
- * enviada de dispositivo linked): tenta resolver via cache/chat_name/Z-API.
- * Se as 3 camadas falham, retorna o LID original (fallback) — chat fica
- * marcado com raw_payload._lid_unresolved=true pra retry posterior.
- */
-async function resolveChatIdFromPayload(p: any, instanceId: string): Promise<{ chatId: string; resolved: boolean }> {
-  if (!isLid(p.phone)) return { chatId: p.phone, resolved: true };
-  if (!p.fromMe)       return { chatId: p.phone, resolved: true }; // recebida @lid (raro)
-  if (p.isGroup)       return { chatId: p.phone, resolved: true }; // grupo @lid
-
-  const { phone } = await resolveLidToPhone(p.phone, p.chatName ?? null, instanceId);
-  return phone ? { chatId: phone, resolved: true } : { chatId: p.phone, resolved: false };
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
 }
 
 Deno.serve(async (req) => {
@@ -161,39 +65,50 @@ Deno.serve(async (req) => {
     return new Response("invalid json", { status: 400, headers: cors });
   }
 
-  // Auth do webhook — SENHA POR INSTANCIA (multi-instancia). Cada instancia Z-API
-  // tem seu PROPRIO webhook-token (mandado no header `z-api-token`). Validamos a
-  // senha recebida contra zapi_instance.webhook_token DA INSTANCIA do payload.
+  // ── Detecta o provider tentando os adapters registrados ───────────────────
+  const provider = PROVIDERS.find((p) => p.matchesWebhook(payload)) ?? null;
+
+  // ── Resolve credenciais da instancia (se o provider souber a chave) ────────
+  const instKey = provider?.webhookInstanceKey(payload) ?? null;
+  let creds: CredsRow | null = null;
+  if (instKey) {
+    const { data } = await supabase
+      .from("wa_instance")
+      .select(CREDS_COLUMNS)
+      .eq("instance_id", instKey)
+      .maybeSingle();
+    creds = (data as CredsRow | null) ?? null;
+  }
+
+  // ── Auth do webhook (gate + TOFU para Z-API) ──────────────────────────────
   // Caminhos aceitos:
   //   (a) supplied == ZAPI_WEBHOOK_TOKEN (env) — compat da instancia pessoal;
-  //   (b) supplied == webhook_token salvo da instancia (payload.instanceId);
-  //   (c) TOFU: instancia REGISTRADA mas ainda sem webhook_token salvo -> aprende
-  //       a senha desta 1a requisicao e passa a exigi-la dai em diante.
-  if (REQUIRE_AUTH) {
+  //   (b) provider.verifyWebhookAuth(...) == true (token salvo da instancia bate);
+  //   (c) TOFU (so Z-API): instancia REGISTRADA mas ainda sem webhook_token salvo
+  //       -> aprende a senha desta 1a requisicao e passa a exigi-la dai em diante.
+  if (REQUIRE_AUTH && provider) {
     const supplied = req.headers.get("z-api-token") ?? "";
     let authed = !!ZAPI_WEBHOOK_TOKEN && supplied === ZAPI_WEBHOOK_TOKEN;
+
     if (!authed) {
-      const rawInst = typeof payload?.instanceId === "string" ? payload.instanceId : null;
-      if (rawInst && supplied) {
-        const { data: inst } = await supabase
-          .from("zapi_instance").select("webhook_token").eq("instance_id", rawInst).maybeSingle();
-        if (inst) {
-          if (inst.webhook_token === supplied) {
-            authed = true;
-          } else if (!inst.webhook_token) {
-            // TOFU: aprende o webhook-token desta instancia registrada
-            await supabase.from("zapi_instance").update({ webhook_token: supplied }).eq("instance_id", rawInst);
-            console.warn("WEBHOOK_AUTH: TOFU aprendeu webhook_token da instancia", rawInst);
-            authed = true;
-          }
-        }
-      }
+      authed = provider.verifyWebhookAuth(payload, req.headers, creds);
     }
+
+    // TOFU (apenas Z-API): aprende o webhook_token de uma instancia registrada
+    // que ainda nao tem um salvo. Replica o comportamento legado do orquestrador.
+    if (!authed && provider.id === "zapi" && instKey && supplied && creds && !creds.webhook_token) {
+      await supabase
+        .from("wa_instance")
+        .update({ webhook_token: supplied })
+        .eq("instance_id", instKey);
+      console.warn("WEBHOOK_AUTH: TOFU aprendeu webhook_token da instancia", instKey);
+      creds.webhook_token = supplied;
+      authed = true;
+    }
+
     if (!authed) {
-      console.warn("WEBHOOK_AUTH: rejeitado", payload?.instanceId);
-      return new Response(JSON.stringify({ error: "unauthorized" }), {
-        status: 401, headers: { ...cors, "Content-Type": "application/json" },
-      });
+      console.warn("WEBHOOK_AUTH: rejeitado", instKey);
+      return jsonResponse({ error: "unauthorized" }, 401);
     }
   }
 
@@ -211,7 +126,7 @@ Deno.serve(async (req) => {
   const { data: rawRow } = await supabase
     .from("webhook_events_raw")
     .insert({
-      event_type: payload.type ?? "unknown",
+      event_type: payload.type ?? payload.event ?? "unknown",
       payload,
       was_waiting: payload?.waitingMessage === true,
     })
@@ -219,292 +134,289 @@ Deno.serve(async (req) => {
     .single();
 
   try {
-    await routeEvent(payload);
+    if (!provider) {
+      console.log("Unhandled webhook (nenhum provider deu match)", payload?.type);
+    } else {
+      let events: InboundEvent[] = await provider.normalizeInbound(payload, creds as InstanceCreds);
+      if (provider.resolveChatIds) {
+        events = await provider.resolveChatIds(events, creds as InstanceCreds, { supabase });
+      }
+      for (const ev of events) {
+        await dispatch(ev, creds as InstanceCreds, provider);
+      }
+    }
+
     if (rawRow?.id) {
       await supabase
         .from("webhook_events_raw")
         .update({ processed: true, processed_at: new Date().toISOString() })
         .eq("id", rawRow.id);
     }
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: { ...cors, "Content-Type": "application/json" },
-    });
+    return jsonResponse({ ok: true });
   } catch (err) {
     console.error("process-webhook error", err);
     if (rawRow?.id) {
       await supabase.from("webhook_events_raw").update({ error: String(err) }).eq("id", rawRow.id);
     }
-    return new Response(JSON.stringify({ error: String(err) }), {
-      status: 500,
-      headers: { ...cors, "Content-Type": "application/json" },
-    });
+    return jsonResponse({ error: String(err) }, 500);
   }
 });
 
-async function routeEvent(p: any) {
-  switch (p.type) {
-    case "ReceivedCallback":        return handleReceived(p);
-    case "DeliveryCallback":        return handleReceived({ ...p, fromMe: true });
-    case "MessageStatusCallback":   return handleStatus(p);
-    case "MessageReactionCallback": return handleReaction(p);
-    case "EditedMessageCallback":   return handleEdited(p);
-    case "RevokedMessageCallback":  return handleRevoked(p);
-    case "PresenceChatCallback":    return; // presence_events descontinuada (migration 0022)
-    case "ConnectedCallback":       return handleConnection(p, true);
-    case "DisconnectedCallback":    return handleConnection(p, false);
-    case "NotificationCallback":    return handleGroupNotif(p);
-    default: console.log("Unhandled event type:", p.type);
+// ─── dispatch: persiste um InboundEvent neutro ───────────────────────────────
+// Porta a metade de PERSISTENCIA dos antigos handlers (a metade de PARSING
+// migrou pros adapters via normalizeInbound). instance_id vem de creds.
+async function dispatch(ev: InboundEvent, creds: InstanceCreds, provider: WaProvider): Promise<void> {
+  const instanceId = creds.instance_id;
+  switch (ev.kind) {
+    case "message":      return persistMessage(ev, instanceId, creds, provider);
+    case "status":       return persistStatus(ev, instanceId);
+    case "reaction":     return persistReaction(ev, instanceId);
+    case "edit":         return persistEdit(ev, instanceId);
+    case "revoke":       return persistRevoke(ev, instanceId);
+    case "group_participant": return persistGroupParticipant(ev, instanceId);
+    case "connection":   return persistConnection(ev, instanceId);
   }
 }
 
-
-async function handleReceived(p: any) {
-  // Z-API as vezes manda webhook antes de decriptar/baixar o conteudo.
-  // Vem so com metadados (phone, messageId, senderName, waitingMessage:true)
-  // e SEM payload de mensagem (text/audio/image/etc). Em segundos ela manda
-  // outro webhook com o mesmo messageId e o conteudo real. Se inserirmos esse
-  // evento como message_type=unknown, o follow-up bate no unique constraint
-  // de provider_msg_id e e descartado silenciosamente — msg fica unknown
-  // pra sempre, sem midia. webhook_events_raw ja registra o evento.
-  if (p.waitingMessage === true) {
-    console.log("skip waitingMessage", p.messageId);
-    return;
-  }
-
-  // Z-API empacota eventos nao-de-mensagem dentro de type=ReceivedCallback,
-  // identificando o conteudo real via flags do payload (verificado 12/05/2026:
-  // em 24h, 0 MessageReactionCallback/NotificationCallback foram entregues
-  // como type proprio — TUDO vem como ReceivedCallback). routeEvent so olha
-  // p.type, entao reactions/notifs/edits caiam em handleReceived virando
-  // message_type=unknown e poluindo a tabela messages (issue #5).
-  // Redirecionamento defense-in-depth pros handlers corretos.
-  if (p.notification) return handleGroupNotif(p);
-  if (p.reaction)     return handleReaction(p);
-  if (p.isEdit)       return handleEdited(p);
-  if (p.pinMessage) {
-    // Z-API nao tem schema pra pin/unpin no banco. Log e skip por enquanto.
-    console.log("skip pinMessage", p.messageId, p.pinMessage?.action);
-    return;
-  }
-
-  const ts = new Date(p.momment ?? Date.now()).toISOString();
-  const instanceId = await resolveInstance(p);
-  const { chatId, resolved } = await resolveChatIdFromPayload(p, instanceId);
+// kind:"message" — porta handleReceived (process-webhook legado :261-352).
+async function persistMessage(
+  ev: Extract<InboundEvent, { kind: "message" }>,
+  instanceId: string,
+  creds: InstanceCreds,
+  provider: WaProvider,
+): Promise<void> {
+  const ts = ev.timestamp;
+  const chatId = ev.chatId;
   // phone só é populado para chat_id puro digit (privados 1-1).
-  // Grupos (-group), LIDs (@lid), newsletters e broadcasts não têm phone real.
+  // Grupos (-group / @g.us), LIDs (@lid), newsletters e broadcasts não têm phone real.
   const phone = typeof chatId === "string" && /^[0-9]+$/.test(chatId) ? chatId : null;
+
+  // is_community / profile_thumbnail nao fazem parte do InboundEvent neutro mas
+  // existem no payload Z-API cru (ev.raw). Lidos defensivamente pra preservar o
+  // comportamento legado sem acoplar o orquestrador a um provider especifico:
+  // ausentes (Evolution) viram false/null, que e o default da coluna.
+  const raw = (ev.raw ?? {}) as Record<string, unknown>;
+  const isCommunity = raw.isCommunity === true;
+  const profileThumbnail = (typeof raw.photo === "string" ? raw.photo : null);
+
   await supabase.from("chats").upsert({
     instance_id: instanceId,
     chat_id: chatId,
     phone,
-    chat_name: p.chatName ?? null,
-    is_group: !!p.isGroup,
-    is_community: !!p.isCommunity,
-    profile_thumbnail: p.photo ?? null,
+    chat_name: ev.chatName,
+    is_group: ev.isGroup,
+    is_community: isCommunity,
+    profile_thumbnail: profileThumbnail,
     last_message_at: ts,
-    ...(p.fromMe ? { last_sent_at: ts } : { last_received_at: ts }),
+    ...(ev.fromMe ? { last_sent_at: ts } : { last_received_at: ts }),
   }, { onConflict: "instance_id,chat_id" });
-
-  const { messageType, content, caption, mediaInfo } = extractMediaInfo(p);
-
-  const SKIP_KEYS = new Set([
-    "type", "instanceId", "messageId", "phone", "chatName", "senderName",
-    "isGroup", "isCommunity", "fromMe", "momment", "photo", "participantPhone",
-    "forwarded", "referencedMessage", "broadcast", "fromApi", "waitingMessage",
-    "name", "senderPhoto", "status", "ack",
-  ]);
-  const rawTypeHint = messageType === "unknown"
-    ? Object.keys(p).find(k => !SKIP_KEYS.has(k) && p[k] !== null && p[k] !== undefined && p[k] !== false) ?? null
-    : null;
-
-  // sender_phone: quando fromMe=true, remetente real é o dono (connectedPhone),
-  // não o destinatário. Antes do fix, salvava p.phone (que ia vir como @lid).
-  const senderPhone = p.fromMe
-    ? (p.connectedPhone ?? p.participantPhone ?? null)
-    : (p.participantPhone ?? p.phone);
-
-  const rawPayload = resolved ? p : { ...p, _lid_unresolved: true };
 
   const { data: msg, error } = await supabase.from("messages").insert({
     instance_id: instanceId,
-    provider_msg_id: p.messageId,
+    provider_msg_id: ev.providerMsgId,
     chat_id: chatId,
-    direction: p.fromMe ? "sent" : "received",
-    from_me: !!p.fromMe,
-    // fromApi=true = disparo via API que NAO passou pela edge send-message (ela
-    // insere primeiro com sent_by_agent+nome e este insert vira duplicata 23505).
-    // Sem isso, disparo de API direto (zapi_action etc) ficava logado como "dono".
-    sent_by_agent: !!p.fromApi,
-    sender_phone: senderPhone,
-    sender_name: p.senderName ?? null,
-    message_type: messageType,
-    content,
-    caption,
-    raw_type_hint: rawTypeHint,
-    // Z-API manda a referência do reply como referenceMessageId (string no topo);
-    // o shape antigo referencedMessage.messageId nunca apareceu em prod (1,19M
-    // msgs, 0 hits — verificado 09/07/2026), fica como fallback defensivo.
-    quoted_msg_id: p.referenceMessageId ?? p.referencedMessage?.messageId ?? null,
-    is_forwarded: !!p.forwarded,
-    message_ts: new Date(p.momment ?? Date.now()).toISOString(),
-    raw_payload: rawPayload,
+    direction: ev.fromMe ? "sent" : "received",
+    from_me: ev.fromMe,
+    // fromApi=true (Z-API, lido defensivo do raw) = disparo via API que NAO passou
+    // pela edge send-message (ela insere primeiro com sent_by_agent+nome e este
+    // insert vira duplicata 23505). Sem isso, disparo de API direto (zapi_action
+    // etc) ficava logado como "dono". Evolution nao manda o campo → false.
+    sent_by_agent: raw.fromApi === true,
+    sender_phone: ev.senderPhone,
+    sender_name: ev.senderName,
+    message_type: ev.messageType,
+    content: ev.content,
+    caption: ev.caption,
+    raw_type_hint: null, // logica Z-API-especifica descontinuada na neutralizacao
+    quoted_msg_id: ev.quotedProviderId,
+    is_forwarded: ev.isForwarded,
+    message_ts: ts,
+    raw_payload: ev.raw,
   }).select("id").single();
 
-  if (error?.code === "23505") return; // duplicado
+  if (error?.code === "23505") return; // duplicado (provider_msg_id ja existe)
   if (error) throw error;
 
-  if (mediaInfo) {
-    await downloadMediaToStorage(msg!.id, instanceId, chatId, p.messageId, mediaInfo);
+  if (ev.media) {
+    await downloadMediaToStorage(msg!.id, instanceId, chatId, ev.providerMsgId, ev.media, creds, provider);
   }
 }
 
-function extractMediaInfo(p: any) {
-  if (p.text)     return { messageType: "text",     content: p.text.message,        caption: null,                    mediaInfo: null };
-  if (p.image)    return { messageType: "image",    content: null,                   caption: p.image.caption ?? null, mediaInfo: { url: p.image.imageUrl,       mime: p.image.mimeType,    bucket: "whatsapp-images",    ext: "jpg",  width: p.image.width, height: p.image.height, thumb: p.image.thumbnailUrl } };
-  if (p.audio)    return { messageType: p.audio.ptt ? "ptt" : "audio", content: null, caption: null,                 mediaInfo: { url: p.audio.audioUrl,       mime: p.audio.mimeType,    bucket: "whatsapp-audio",     ext: "ogg",  duration: p.audio.seconds } };
-  if (p.video)    return { messageType: "video",    content: null,                   caption: p.video.caption ?? null, mediaInfo: { url: p.video.videoUrl,       mime: p.video.mimeType,    bucket: "whatsapp-video",     ext: "mp4",  duration: p.video.seconds } };
-  if (p.document) return { messageType: "document", content: p.document.fileName,   caption: null,                    mediaInfo: { url: p.document.documentUrl, mime: p.document.mimeType, bucket: "whatsapp-documents", ext: "bin",  filename: p.document.fileName } };
-  if (p.sticker)  return { messageType: "sticker",  content: null,                   caption: null,                    mediaInfo: { url: p.sticker.stickerUrl,   mime: p.sticker.mimeType,  bucket: "whatsapp-stickers",  ext: "webp" } };
-  if (p.location) return { messageType: "location", content: JSON.stringify(p.location), caption: null,               mediaInfo: null };
-  if (p.contact)  return { messageType: "contact",  content: p.contact.displayName, caption: null,                    mediaInfo: null };
-  if (p.poll)     return { messageType: "poll",     content: p.poll.name,            caption: null,                    mediaInfo: null };
-  return { messageType: "unknown", content: null, caption: null, mediaInfo: null };
-}
-
-async function handleStatus(p: any) {
-  // Apos remocao de presence_events (migration 0022_2026-05-27), so atualizamos
-  // send_status na tabela messages. Sem mais log de presence/delivery rastreado.
-  const sendMap: Record<string, string> = { SENT: "sent", RECEIVED: "delivered", READ: "read", PLAYED: "read" };
-  const instanceId = await resolveInstance(p);
-  for (const id of (p.ids ?? [])) {
-    const ns = sendMap[p.status];
-    if (ns) await supabase.from("messages").update({ send_status: ns })
-      .eq("instance_id", instanceId).eq("provider_msg_id", id).eq("sent_by_agent", true);
+// kind:"status" — porta handleStatus (:367-377). ev.status ja mapeado (sent/delivered/read).
+async function persistStatus(
+  ev: Extract<InboundEvent, { kind: "status" }>,
+  instanceId: string,
+): Promise<void> {
+  for (const id of ev.providerMsgIds) {
+    await supabase.from("messages").update({ send_status: ev.status })
+      .eq("instance_id", instanceId)
+      .eq("provider_msg_id", id)
+      .eq("sent_by_agent", true);
   }
 }
 
-async function handleReaction(p: any) {
-  // Z-API entrega reactions como type=ReceivedCallback com p.reaction.referencedMessage
-  // (verificado 12/05/2026). Caso teorico de MessageReactionCallback teria
-  // p.referencedMessage no top — mantemos fallback. Se nenhum, ignora.
-  const targetId = p.reaction?.referencedMessage?.messageId ?? p.referencedMessage?.messageId;
-  if (!targetId) return;
-  const emoji = p.reaction?.value || null;
-  const instanceId = await resolveInstance(p);
-  const { chatId } = await resolveChatIdFromPayload(p, instanceId);
-  // reactor_phone: quando fromMe=true, é o dono (connectedPhone), não o LID
-  const reactorPhone = p.fromMe
-    ? (p.connectedPhone ?? p.participantPhone ?? chatId)
-    : (p.participantPhone ?? chatId);
-  if (!emoji) {
+// kind:"reaction" — porta handleReaction (:379-405). emoji vazio/null => delete.
+async function persistReaction(
+  ev: Extract<InboundEvent, { kind: "reaction" }>,
+  instanceId: string,
+): Promise<void> {
+  if (!ev.emoji) {
     await supabase.from("message_reactions").delete()
-      .eq("instance_id", instanceId).eq("target_msg_id", targetId).eq("reactor_phone", reactorPhone);
+      .eq("instance_id", instanceId)
+      .eq("target_msg_id", ev.targetProviderMsgId)
+      .eq("reactor_phone", ev.reactorPhone);
     return;
   }
-  const t = p.reaction?.time ?? Date.now();
   await supabase.from("message_reactions").upsert({
     instance_id: instanceId,
-    target_msg_id: targetId, chat_id: chatId,
-    reactor_phone: reactorPhone,
-    reactor_name: p.senderName ?? null, emoji, from_me: !!p.fromMe,
-    reacted_at: new Date(t < 1e12 ? t * 1000 : t).toISOString(), raw_payload: p,
+    target_msg_id: ev.targetProviderMsgId,
+    chat_id: ev.chatId,
+    reactor_phone: ev.reactorPhone,
+    reactor_name: ev.reactorName,
+    emoji: ev.emoji,
+    from_me: ev.fromMe,
+    reacted_at: ev.timestamp,
+    raw_payload: ev.raw,
   }, { onConflict: "instance_id,target_msg_id,reactor_phone" });
 }
 
-async function handleEdited(p: any) {
-  const newContent = p.text?.message ?? null;
-  const instanceId = await resolveInstance(p);
+// kind:"edit" — porta handleEdited (:407-415).
+async function persistEdit(
+  ev: Extract<InboundEvent, { kind: "edit" }>,
+  instanceId: string,
+): Promise<void> {
   const { data: existing } = await supabase.from("messages").select("id, content")
-    .eq("instance_id", instanceId).eq("provider_msg_id", p.messageId).maybeSingle();
+    .eq("instance_id", instanceId)
+    .eq("provider_msg_id", ev.providerMsgId)
+    .maybeSingle();
   if (!existing) return;
-  await supabase.from("messages").update({ is_edited: true, content: newContent }).eq("id", existing.id);
-  await supabase.from("message_edits").insert({ message_id: existing.id, previous_content: existing.content, new_content: newContent });
+  await supabase.from("messages")
+    .update({ is_edited: true, content: ev.newContent })
+    .eq("id", existing.id);
+  await supabase.from("message_edits").insert({
+    message_id: existing.id,
+    previous_content: existing.content,
+    new_content: ev.newContent,
+  });
 }
 
-async function handleRevoked(p: any) {
-  const instanceId = await resolveInstance(p);
+// kind:"revoke" — porta handleRevoked (:417-421).
+async function persistRevoke(
+  ev: Extract<InboundEvent, { kind: "revoke" }>,
+  instanceId: string,
+): Promise<void> {
   await supabase.from("messages").update({ is_deleted: true })
-    .eq("instance_id", instanceId).eq("provider_msg_id", p.messageId);
+    .eq("instance_id", instanceId)
+    .eq("provider_msg_id", ev.providerMsgId);
 }
 
-// handlePresence removido — tabela presence_events foi descontinuada
-// (migration 0022_2026-05-27). Eventos de presence inbound sao ignorados.
-
-async function handleConnection(p: any, connected: boolean) {
-  const field = connected ? "last_connected_at" : "last_disconnected_at";
-  await supabase.from("zapi_instance").update({ [field]: new Date().toISOString(), is_active: connected }).eq("instance_id", p.instanceId);
-}
-
-async function handleGroupNotif(p: any) {
-  const phones: string[] = p.notificationParameters ?? [];
-  const instanceId = await resolveInstance(p);
-  for (const phone of phones) {
-    if (p.notification === "GROUP_PARTICIPANT_ADD") {
-      await supabase.from("group_participants").upsert({ instance_id: instanceId, chat_id: p.phone, phone, joined_at: new Date().toISOString(), left_at: null }, { onConflict: "instance_id,chat_id,phone" });
-    } else if (p.notification === "GROUP_PARTICIPANT_REMOVE") {
-      await supabase.from("group_participants").update({ left_at: new Date().toISOString() }).eq("instance_id", instanceId).eq("chat_id", p.phone).eq("phone", phone);
-    } else if (p.notification === "GROUP_PARTICIPANT_PROMOTE") {
-      await supabase.from("group_participants").update({ is_admin: true }).eq("instance_id", instanceId).eq("chat_id", p.phone).eq("phone", phone);
-    } else if (p.notification === "GROUP_PARTICIPANT_DEMOTE") {
-      await supabase.from("group_participants").update({ is_admin: false }).eq("instance_id", instanceId).eq("chat_id", p.phone).eq("phone", phone);
+// kind:"group_participant" — porta handleGroupNotif (:431-445).
+async function persistGroupParticipant(
+  ev: Extract<InboundEvent, { kind: "group_participant" }>,
+  instanceId: string,
+): Promise<void> {
+  for (const phone of ev.phones) {
+    if (ev.action === "add") {
+      await supabase.from("group_participants").upsert({
+        instance_id: instanceId,
+        chat_id: ev.chatId,
+        phone,
+        joined_at: new Date().toISOString(),
+        left_at: null,
+      }, { onConflict: "instance_id,chat_id,phone" });
+    } else if (ev.action === "remove") {
+      await supabase.from("group_participants")
+        .update({ left_at: new Date().toISOString() })
+        .eq("instance_id", instanceId).eq("chat_id", ev.chatId).eq("phone", phone);
+    } else if (ev.action === "promote") {
+      await supabase.from("group_participants")
+        .update({ is_admin: true })
+        .eq("instance_id", instanceId).eq("chat_id", ev.chatId).eq("phone", phone);
+    } else if (ev.action === "demote") {
+      await supabase.from("group_participants")
+        .update({ is_admin: false })
+        .eq("instance_id", instanceId).eq("chat_id", ev.chatId).eq("phone", phone);
     }
   }
 }
 
-// Timeout por tipo — Backblaze temp URLs expiram rapido, entao audios/videos/docs tem prioridade
-const DL_TIMEOUT_MS: Record<string, number> = {
-  "whatsapp-audio":     30000,
-  "whatsapp-video":     45000,
-  "whatsapp-documents": 30000,
-  "whatsapp-images":    15000,
-  "whatsapp-stickers":  10000,
-};
-
-async function fetchWithRetry(url: string, timeoutMs: number, attempts = 2): Promise<Uint8Array> {
-  let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), timeoutMs);
-      const res = await fetch(url, {
-        signal: ac.signal,
-        headers: { "User-Agent": "whatsapp-agent/1.0" },
-      });
-      clearTimeout(timer);
-      if (!res.ok) throw new Error(`fetch ${res.status}`);
-      return new Uint8Array(await res.arrayBuffer());
-    } catch (e) {
-      lastErr = e;
-      if (i < attempts - 1) await new Promise(r => setTimeout(r, 500));
-    }
-  }
-  throw lastErr;
+// kind:"connection" — porta handleConnection (:426-428). Tabela agora e wa_instance,
+// keyed por creds.instance_id.
+async function persistConnection(
+  ev: Extract<InboundEvent, { kind: "connection" }>,
+  instanceId: string,
+): Promise<void> {
+  const field = ev.connected ? "last_connected_at" : "last_disconnected_at";
+  await supabase.from("wa_instance")
+    .update({ [field]: new Date().toISOString(), is_active: ev.connected })
+    .eq("instance_id", instanceId);
 }
 
-async function downloadMediaToStorage(messageId: string, instanceId: string, chatId: string, msgId: string, info: any) {
-  const path = `${instanceId}/${chatId}/${msgId}.${info.ext}`;
+// ─── Mídia: busca bytes via provider + sobe pro Storage ──────────────────────
+// Porta downloadMediaToStorage (:477-503), mas os bytes agora vêm de
+// provider.fetchMedia(creds, ref) em vez de um GET direto na URL aqui.
+async function downloadMediaToStorage(
+  messageId: string,
+  instanceId: string,
+  chatId: string,
+  msgId: string,
+  ref: MediaRef,
+  creds: InstanceCreds,
+  provider: WaProvider,
+): Promise<void> {
+  const path = `${instanceId}/${chatId}/${msgId}.${ref.ext}`;
   const { data: mediaRow } = await supabase.from("message_media").insert({
-    message_id: messageId, mime_type: info.mime, storage_bucket: info.bucket,
-    storage_path: path, original_url: info.url,
-    duration_seconds: info.duration ?? null, width: info.width ?? null, height: info.height ?? null,
+    message_id: messageId,
+    mime_type: ref.mime,
+    storage_bucket: ref.bucket,
+    storage_path: path,
+    original_url: ref.url ?? null,
+    duration_seconds: ref.duration ?? null,
+    width: ref.width ?? null,
+    height: ref.height ?? null,
     download_status: "pending",
   }).select("id").single();
 
   try {
-    const timeoutMs = DL_TIMEOUT_MS[info.bucket] ?? 15000;
-    const bytes = await fetchWithRetry(info.url, timeoutMs);
-    const { error: upErr } = await supabase.storage.from(info.bucket).upload(path, bytes, { contentType: info.mime, upsert: true });
+    const { bytes, mime } = await provider.fetchMedia(creds, ref);
+    const { error: upErr } = await supabase.storage.from(ref.bucket)
+      .upload(path, bytes, { contentType: mime, upsert: true });
     if (upErr) throw upErr;
-    if (info.thumb) {
+
+    // Thumbnail: so quando o provider expõe thumbUrl no MediaRef (Z-API).
+    if (ref.thumbUrl) {
       try {
-        const tb = await fetchWithRetry(info.thumb, 8000, 1);
+        const tb = await fetchThumbnail(ref.thumbUrl);
         const tp = `${instanceId}/${chatId}/${msgId}.jpg`;
-        await supabase.storage.from("whatsapp-thumbnails").upload(tp, tb, { contentType: "image/jpeg", upsert: true });
+        await supabase.storage.from("whatsapp-thumbnails")
+          .upload(tp, tb, { contentType: "image/jpeg", upsert: true });
         await supabase.from("message_media").update({ thumbnail_path: tp }).eq("id", mediaRow!.id);
       } catch { /* thumb nao bloqueia */ }
     }
-    await supabase.from("message_media").update({ download_status: "done", file_size_bytes: bytes.length }).eq("id", mediaRow!.id);
+
+    await supabase.from("message_media")
+      .update({ download_status: "done", file_size_bytes: bytes.length })
+      .eq("id", mediaRow!.id);
   } catch (e) {
-    await supabase.from("message_media").update({ download_status: "pending", download_error: String(e) }).eq("id", mediaRow!.id);
+    await supabase.from("message_media")
+      .update({ download_status: "pending", download_error: String(e) })
+      .eq("id", mediaRow!.id);
+  }
+}
+
+// GET direto de um thumbnail (URL publica/temporaria). Mantido no orquestrador
+// pois o thumbnail e secundario e nao passa pelo fluxo de fetchMedia do provider.
+async function fetchThumbnail(url: string): Promise<Uint8Array> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      signal: ac.signal,
+      headers: { "User-Agent": "whatsapp-agent/1.0" },
+    });
+    if (!res.ok) throw new Error(`fetch ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
+  } finally {
+    clearTimeout(timer);
   }
 }

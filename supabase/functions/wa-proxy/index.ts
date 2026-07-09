@@ -1,20 +1,21 @@
-// zapi-proxy — edge function que centraliza todas as chamadas Z-API
-// que antes saiam direto do MCP local (PC/notebook/VPS).
+// wa-proxy — gateway de ações agnóstico de provider (substitui zapi-proxy).
 //
-// Item 8.1 do PRD (whatsapp-agent). Apos cutover (Fase D), MCP perde envs
-// ZAPI_INSTANCE_ID/ZAPI_TOKEN/ZAPI_CLIENT_TOKEN — token vive so na tabela
-// zapi_instance e e lido aqui.
+// Item 8.1 do PRD (whatsapp-agent). Após cutover (Fase D), o MCP perde envs
+// ZAPI_INSTANCE_ID/ZAPI_TOKEN/ZAPI_CLIENT_TOKEN — credenciais vivem na tabela
+// wa_instance e são lidas aqui.
 //
 // Features:
 //   - Allowlist literal de 18 actions categorizadas (READ/WRITE/DESTRUCTIVE)
-//   - confirmed: true obrigatorio em DESTRUCTIVE (defense-in-depth do gate MCP)
+//   - confirmed: true obrigatório em DESTRUCTIVE (defense-in-depth do gate MCP)
 //   - Idempotency: agent_request_id UNIQUE com cache 24h
-//   - Rate limit por categoria (DESTRUCTIVE usa messages; WRITE/READ usa zapi_action_log)
-//   - Audit log inline em zapi_action_log
-//   - Sanitizacao anti-log-injection
-//   - Timeout 15s na chamada Z-API
+//   - Rate limit por categoria (DESTRUCTIVE usa messages; WRITE/READ usa wa_action_log)
+//   - Audit log inline em wa_action_log
+//   - Sanitização anti-log-injection
+//   - Timeout 15s na chamada do provider
+//   - Dispatch via getProvider(creds.provider).buildAction (anti-SSRF: allowlist antes do dispatch)
 //
-// Veredito do Conselho (5 LLMs, 11/05/2026): GO COM AJUSTES — todos aplicados aqui.
+// Tasks 1-15 done; migration 0040 renomeou: zapi_instance→wa_instance, zapi_action_log→wa_action_log,
+// token→auth_token, e adicionou colunas provider/base_url.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import {
@@ -22,6 +23,8 @@ import {
   checkActionRateLimit,
   type Category,
 } from "../_shared/rate-limit.ts";
+import { getProvider } from "../_shared/wa/index.ts";
+import type { InstanceCreds } from "../_shared/wa/types.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -34,12 +37,9 @@ const cors = {
 };
 
 // ─── Allowlist ──────────────────────────────────────────────────────────────
-// CRITICO: action eh validada como LITERAL STRING MATCH contra estes sets.
-// URL Z-API soh eh montada DEPOIS do match (anti-SSRF). Nunca concatenar input.
+// CRÍTICO: action é validada como LITERAL STRING MATCH contra estes sets.
+// URL do provider só é montada DEPOIS do match (anti-SSRF). Nunca concatenar input.
 
-// Allowlist alinhada com docs Z-API (https://developer.z-api.io/llms.txt)
-// Apos correcao 12/05/2026 (pesquisa via Conselho-on-demand). Mantemos aliases
-// pra retrocompat onde Z-API aceita os dois (edit-message/delete-message).
 const READ_ACTIONS = new Set([
   "status",
   "chats",
@@ -58,11 +58,11 @@ const WRITE_ACTIONS = new Set([
 const DESTRUCTIVE_SEND_ACTIONS = new Set([
   "send-text",
   "send-poll",
-  "forward",           // canonico Z-API (substitui forward-message)
+  "forward",           // canônico Z-API (substitui forward-message)
   "forward-message",   // alias retrocompat
 ]);
 
-// DESTRUCTIVE outras (rate limit so global)
+// DESTRUCTIVE outras (rate limit só global)
 const DESTRUCTIVE_OTHER_ACTIONS = new Set([
   "delete-message",    // POST aceito (docs dizem DELETE; aceitamos POST igual smoke)
   "block-contact",     // payload {phone, action: "block"|"unblock"}
@@ -110,7 +110,7 @@ function json(data: unknown, status = 200, extraHeaders?: Record<string, string>
   });
 }
 
-// Sanitizacao anti-log-injection (Auditor: CWE-117)
+// Sanitização anti-log-injection (Auditor: CWE-117)
 function sanitizeAgentName(name: unknown): string {
   if (typeof name !== "string") return "unknown";
   return name.replace(/[^\w.\-]/g, "").slice(0, 64) || "unknown";
@@ -120,11 +120,11 @@ function sanitizeAgentName(name: unknown): string {
 async function findCachedResponse(agentRequestId: string) {
   const oneDayAgo = new Date(Date.now() - 86_400_000).toISOString();
   const { data } = await supabase
-    .from("zapi_action_log")
+    .from("wa_action_log")
     .select("result_status, result_body, error, action")
     .eq("agent_request_id", agentRequestId)
     .gte("called_at", oneDayAgo)
-    .not("result_status", "is", null)  // soh retorna se ja concluiu
+    .not("result_status", "is", null)  // só retorna se já concluiu
     .order("called_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -155,7 +155,7 @@ Deno.serve(async (req) => {
   // 2. Validate action (allowlist literal match — anti-SSRF)
   if (typeof action !== "string" || !ALLOWED.has(action)) {
     // Log mesmo rejeitado pra observability
-    await supabase.from("zapi_action_log").insert({
+    await supabase.from("wa_action_log").insert({
       action: typeof action === "string" ? action.slice(0, 64) : "invalid",
       category: "rejected",
       params: typeof params === "object" ? params : null,
@@ -182,19 +182,19 @@ Deno.serve(async (req) => {
     return json({ error: "params too large" }, 400);
   }
 
-  // 5. confirmed obrigatorio em DESTRUCTIVE
+  // 5. confirmed obrigatório em DESTRUCTIVE
   if (REQUIRE_CONFIRMED && category === "destructive" && confirmed !== true) {
     return json({
-      error: "confirmed=true e obrigatorio em DESTRUCTIVE actions",
+      error: "confirmed=true é obrigatório em DESTRUCTIVE actions",
       action,
-      hint: "Garanta que usuario viu destinatario+conteudo antes de chamar com confirmed:true",
+      hint: "Garanta que usuário viu destinatário+conteúdo antes de chamar com confirmed:true",
     }, 403);
   }
 
-  // 6. agent_request_id obrigatorio em WRITE/DESTRUCTIVE
+  // 6. agent_request_id obrigatório em WRITE/DESTRUCTIVE
   if ((category === "write" || category === "destructive") && !agent_request_id) {
     return json({
-      error: "agent_request_id obrigatorio em WRITE/DESTRUCTIVE (idempotency)",
+      error: "agent_request_id obrigatório em WRITE/DESTRUCTIVE (idempotency)",
       action,
     }, 400);
   }
@@ -217,26 +217,38 @@ Deno.serve(async (req) => {
     }
   }
 
-  // 8. Buscar credenciais Z-API da instância indicada (alias ou instance_id);
+  // 8. Buscar credenciais da instância indicada (alias ou instance_id);
   //    fallback à default (compat single-instance). Sanitiza instanceKey
   //    pra evitar injeção no filtro .or() do PostgREST. Resolve ANTES do
   //    rate limit pra escopar a cota por instância.
   if (instanceKey !== undefined && (typeof instanceKey !== "string" || !/^[A-Za-z0-9_-]+$/.test(instanceKey))) {
-    return json({ error: "instance invalido" }, 400);
+    return json({ error: "instance inválido" }, 400);
   }
-  const instSel = supabase.from("zapi_instance").select("instance_id, token, client_token");
+  const instSel = supabase
+    .from("wa_instance")
+    .select("provider, instance_id, base_url, auth_token, client_token, alias");
   const { data: instance } = (typeof instanceKey === "string" && instanceKey.length > 0)
     ? await instSel.or(`alias.eq.${instanceKey},instance_id.eq.${instanceKey}`).limit(1).maybeSingle()
     : await instSel.eq("is_default", true).maybeSingle();
-  if (!instance) return json({ error: "instancia Z-API nao encontrada", instance: instanceKey ?? "(default)" }, 500);
+  if (!instance) return json({ error: "instância wa_instance não encontrada", instance: instanceKey ?? "(default)" }, 500);
 
-  // 9. Rate limit (por instância — cada número tem cota Z-API própria)
+  // Montar InstanceCreds tipado para o provider
+  const creds: InstanceCreds = {
+    provider: instance.provider,
+    instance_id: instance.instance_id,
+    base_url: instance.base_url,
+    auth_token: instance.auth_token,
+    client_token: instance.client_token,
+    alias: instance.alias,
+  };
+
+  // 9. Rate limit (por instância — cada número tem cota própria)
   let rl;
   if (category === "destructive" && DESTRUCTIVE_SEND_ACTIONS.has(action)) {
     // Sends precisam de chat_id pra per-chat limit
     const chat_id = params.phone ?? params.chat_id;
     if (!chat_id) {
-      return json({ error: "params.phone obrigatorio em send actions" }, 400);
+      return json({ error: "params.phone obrigatório em send actions" }, 400);
     }
     rl = await checkSendRateLimit(supabase, instance.instance_id, String(chat_id), {
       perChatPerMin: RATE_LIMIT_PER_CHAT_PER_MIN,
@@ -248,7 +260,7 @@ Deno.serve(async (req) => {
   } else if (category === "read") {
     rl = await checkActionRateLimit(supabase, instance.instance_id, "read", RATE_LIMIT_READ_PER_MIN);
   } else {
-    rl = { ok: true };  // DESTRUCTIVE_OTHER nao tem rate limit por chat
+    rl = { ok: true };  // DESTRUCTIVE_OTHER não tem rate limit por chat
   }
 
   if (!rl.ok) {
@@ -259,7 +271,7 @@ Deno.serve(async (req) => {
   const sanitizedAgentName = sanitizeAgentName(agent_name);
   const startTs = Date.now();
   const { data: logRow, error: logErr } = await supabase
-    .from("zapi_action_log")
+    .from("wa_action_log")
     .insert({
       agent_request_id: agent_request_id ?? null,
       action,
@@ -273,63 +285,53 @@ Deno.serve(async (req) => {
     .single();
   if (logErr) console.error("audit log insert error", logErr);
 
-  // 11. Chamada Z-API — aliases e shape tweaks por endpoint
-  const base = `https://api.z-api.io/instances/${instance.instance_id}/token/${instance.token}`;
-  let resolvedAction = action;
-  let resolvedMethod = method;
-  let resolvedParams: any = params;
-
-  // get-contact-info: Z-API exige GET /contacts/{phone}, sem body
-  if (action === "get-contact-info") {
-    if (!params.phone) {
-      return json({ error: "params.phone obrigatorio em get-contact-info" }, 400);
-    }
-    resolvedAction = `contacts/${encodeURIComponent(String(params.phone))}`;
-    resolvedMethod = "GET";
-    resolvedParams = {};
-  }
-
-  // phone-exists: Z-API exige GET /phone-exists/{phone}, sem body.
-  // Resposta traz o numero CANONICO registrado no WhatsApp (campo phone) + lid —
-  // fonte de verdade pra normalizacao do 9o digito antes de primeiro contato.
-  if (action === "phone-exists") {
-    if (!params.phone) {
-      return json({ error: "params.phone obrigatorio em phone-exists" }, 400);
-    }
-    resolvedAction = `phone-exists/${encodeURIComponent(String(params.phone))}`;
-    resolvedMethod = "GET";
-    resolvedParams = {};
-  }
-
-  let url: string;
-  if (resolvedMethod === "GET" && Object.keys(resolvedParams).length > 0) {
-    const qs = new URLSearchParams(
-      Object.fromEntries(Object.entries(resolvedParams).map(([k, v]) => [k, String(v)])),
-    ).toString();
-    url = `${base}/${resolvedAction}?${qs}`;
-  } else {
-    url = `${base}/${resolvedAction}`;
-  }
-
-  let resultStatus: number | null = null;
+  // 11. Dispatch via provider — APÓS allowlist (anti-SSRF)
+  //     getProvider() lança se provider desconhecido (falha 500 segura — não expõe URL)
+  const provider = getProvider(creds.provider);
+  let resultStatus: number = 500;
   let resultBody: unknown = null;
   let errorText: string | null = null;
 
   try {
-    const abort = AbortSignal.timeout(ZAPI_TIMEOUT_MS);
-    const r = await fetch(url, {
-      method: resolvedMethod,
-      headers: {
-        "Content-Type": "application/json",
-        "Client-Token": instance.client_token,
-      },
-      body: resolvedMethod === "POST" ? JSON.stringify(resolvedParams) : undefined,
-      signal: abort,
-    });
-    resultStatus = r.status;
-    const text = await r.text();
-    try { resultBody = JSON.parse(text); } catch { resultBody = text; }
-    if (!r.ok) errorText = `Z-API ${r.status}: ${typeof resultBody === "string" ? resultBody : JSON.stringify(resultBody)}`.slice(0, 500);
+    if (action === "status") {
+      const built = provider.buildAction(creds, "status", {});
+      const r = await fetch(built!.url, {
+        method: built!.method,
+        headers: built!.headers,
+        signal: AbortSignal.timeout(ZAPI_TIMEOUT_MS),
+      });
+      resultStatus = r.status;
+      resultBody = provider.parseConnection(await r.json());
+    } else if (action === "chats") {
+      resultBody = await provider.fetchGroups(creds);
+      resultStatus = 200;
+    } else {
+      // Todos os outros actions (WRITE + DESTRUCTIVE + READ restantes)
+      const built = provider.buildAction(creds, action as any, params);
+      if (!built) {
+        // Provider não suporta esta action — log + 400
+        errorText = `not_supported_by_provider: ${action} / ${creds.provider}`;
+        if (logRow?.id) {
+          await supabase
+            .from("wa_action_log")
+            .update({ result_status: 400, error: errorText, duration_ms: Date.now() - startTs })
+            .eq("id", logRow.id);
+        }
+        return json({ error: "not_supported_by_provider", action, provider: creds.provider }, 400);
+      }
+      const r = await fetch(built.url, {
+        method: built.method,
+        headers: built.headers,
+        body: built.body,
+        signal: AbortSignal.timeout(ZAPI_TIMEOUT_MS),
+      });
+      resultStatus = r.status;
+      const t = await r.text();
+      try { resultBody = JSON.parse(t); } catch { resultBody = t; }
+      if (!r.ok) {
+        errorText = `${creds.provider} ${r.status}: ${typeof resultBody === "string" ? resultBody : JSON.stringify(resultBody)}`.slice(0, 500);
+      }
+    }
   } catch (e) {
     errorText = String(e).slice(0, 500);
     resultStatus = 504;
@@ -340,7 +342,7 @@ Deno.serve(async (req) => {
   // 12. Update audit log com result
   if (logRow?.id) {
     await supabase
-      .from("zapi_action_log")
+      .from("wa_action_log")
       .update({
         result_status: resultStatus,
         result_body: resultBody as any,

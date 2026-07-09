@@ -1,0 +1,8 @@
+{
+  "type": "MessageStatusCallback",
+  "instanceId": "INST123",
+  "ids": ["3EB0A1234567890ABCDE", "3EB0A1234567890ABCDF"],
+  "status": "READ",
+  "phone": "5511999991234",
+  "momment": 1720000001000
+}

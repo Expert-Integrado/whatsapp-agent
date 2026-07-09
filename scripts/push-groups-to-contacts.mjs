@@ -102,7 +102,7 @@ console.log(`Grupos marcados pra sincronizar: ${allowlist.length}`);
 
 // Números do PRÓPRIO dono (instâncias Z-API) ficam fora dos participantes:
 // com o toggle create_members ligado no worker, o dono viraria contato de si mesmo.
-const instances = await sb('zapi_instance?select=phone_connected');
+const instances = await sb('wa_instance?select=phone_connected');
 const ownPhones = new Set(instances.map((i) => i.phone_connected).filter(Boolean));
 
 const allowed = groups.filter((g) => allowlist.includes(g.chat_id));

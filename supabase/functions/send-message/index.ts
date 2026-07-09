@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { getProvider, type OutboundMessage, type InstanceCreds } from "../_shared/wa/index.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -86,17 +87,6 @@ async function checkRateLimit(instanceId: string, chat_id: string): Promise<{ ok
   return { ok: true };
 }
 
-// @todos em grupos: a Z-API nao tem "mencionar todos" nativo. Busca os participantes
-// do grupo via group-metadata e devolve os phones pra preencher o array `mentioned`.
-async function fetchGroupParticipants(base: string, headers: Record<string, string>, groupId: string): Promise<string[]> {
-  try {
-    const r = await fetch(`${base}/group-metadata/${encodeURIComponent(groupId)}`, { headers });
-    if (!r.ok) return [];
-    const m = await r.json();
-    const parts = Array.isArray(m?.participants) ? m.participants : [];
-    return parts.map((p: any) => p?.phone).filter((p: any): p is string => typeof p === "string" && p.length > 0);
-  } catch { return []; }
-}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
@@ -128,11 +118,19 @@ Deno.serve(async (req) => {
   if (instanceKey !== undefined && (typeof instanceKey !== "string" || !/^[A-Za-z0-9_-]+$/.test(instanceKey))) {
     return json({ error: "instance invalido" }, 400);
   }
-  const instSel = supabase.from("zapi_instance").select("instance_id, token, client_token");
-  const { data: instance } = (typeof instanceKey === "string" && instanceKey.length > 0)
+  const instSel = supabase.from("wa_instance").select("provider, instance_id, base_url, auth_token, client_token, alias");
+  const { data: instanceRow } = (typeof instanceKey === "string" && instanceKey.length > 0)
     ? await instSel.or(`alias.eq.${instanceKey},instance_id.eq.${instanceKey}`).limit(1).maybeSingle()
     : await instSel.eq("is_default", true).maybeSingle();
-  if (!instance) return json({ error: "instancia Z-API nao encontrada" }, 500);
+  if (!instanceRow) return json({ error: "instancia nao encontrada" }, 500);
+  const instance: InstanceCreds = {
+    provider: instanceRow.provider,
+    instance_id: instanceRow.instance_id,
+    base_url: instanceRow.base_url ?? null,
+    auth_token: instanceRow.auth_token,
+    client_token: instanceRow.client_token ?? null,
+    alias: instanceRow.alias ?? null,
+  };
 
   // Lookup do chat ESCOPADO por instância (senão colide entre números)
   const { data: chat } = await supabase.from("chats").select("chat_id, phone, is_group")
@@ -161,8 +159,6 @@ Deno.serve(async (req) => {
   if (insertErr) return json({ error: insertErr.message }, 500);
 
   const phone = chat.phone ?? chat_id.replace("@c.us", "").replace("@g.us", "");
-  const base = `https://api.z-api.io/instances/${instance.instance_id}/token/${instance.token}`;
-  const headers = { "Content-Type": "application/json", "Client-Token": instance.client_token };
 
   // Resolve quoted_msg_id: aceita UUID interno (lookup → provider_msg_id) ou provider_msg_id direto.
   // Se UUID nao existir/estiver pending, vira null e msg vai SEM reply (sem regressao vs comportamento anterior).
@@ -180,48 +176,29 @@ Deno.serve(async (req) => {
     }
   }
 
-  // @todos: menciona explicitos (mentions) e, se mentions_everyone num grupo,
-  // expande pra todos os participantes (Z-API nao tem mentionsEveryOne funcional).
-  let mentionedList: string[] = Array.isArray(mentions) ? mentions.filter((m: any): m is string => typeof m === "string") : [];
-  if (mentions_everyone && chat.is_group) {
-    const all = await fetchGroupParticipants(base, headers, phone);
-    if (all.length) mentionedList = all;
-  }
-  // A Z-API so renderiza a mencao quando o TEXTO contem @<numero> (alem do array
-  // `mentioned`). Anexa ao texto os tokens que ainda nao estiverem nele.
-  const mentionTokens = mentionedList.filter((p) => !(content ?? "").includes(`@${p}`)).map((p) => `@${p}`);
-  const withMentions = (txt: string) => mentionTokens.length ? `${txt}${txt ? " " : ""}${mentionTokens.join(" ")}`.trim() : txt;
-
-  let endpoint: string, zapiBody: any;
-  switch (message_type) {
-    case "text":     endpoint = `${base}/send-text`;         zapiBody = { phone, message: withMentions(content ?? ""), ...(resolvedQuotedId && { messageId: resolvedQuotedId }), ...(mentionedList.length && { mentioned: mentionedList }) }; break;
-    case "image":    endpoint = `${base}/send-image`;        zapiBody = { phone, image: media_url, caption: withMentions(content ?? ""), ...(resolvedQuotedId && { messageId: resolvedQuotedId }), ...(mentionedList.length && { mentioned: mentionedList }) }; break;
-    case "audio":    endpoint = `${base}/send-audio`;        zapiBody = { phone, audio: media_url, ...(resolvedQuotedId && { messageId: resolvedQuotedId }) }; break;
-    case "ptt":      endpoint = `${base}/send-audio`;        zapiBody = { phone, audio: media_url, waveform: true, ...(resolvedQuotedId && { messageId: resolvedQuotedId }) }; break;
-    // NOTA (09/05/2026): commits 02de721 (array) e eb01682 (base64 string) tentaram exibir waveform real
-    // mas Z-API rejeita ambos com 400 vazio. Revertido pro `waveform: true` (que envia mas exibe onda reta)
-    // ate identificarmos formato aceito (provavelmente requer endpoint diferente ou conversao server-side
-    // pra OGG/Opus + amplitudes em base64 com Content-Type especifico). Priorizar funcionamento basico
-    // do envio. Investigar formato correto em sessao dedicada.
-    case "video":    endpoint = `${base}/send-video`;        zapiBody = { phone, video: media_url, caption: withMentions(content ?? ""), ...(resolvedQuotedId && { messageId: resolvedQuotedId }), ...(mentionedList.length && { mentioned: mentionedList }) }; break;
-    case "document": endpoint = `${base}/send-document/pdf`; zapiBody = { phone, document: media_url, fileName: file_name ?? content ?? "document.pdf", ...(file_name && content ? { caption: content } : {}), ...(resolvedQuotedId && { messageId: resolvedQuotedId }) }; break;
-    default:         endpoint = `${base}/send-text`;         zapiBody = { phone, message: content ?? "", ...(resolvedQuotedId && { messageId: resolvedQuotedId }) };
-  }
-
-  // Z-API delayMessage (1-15s pausa antes de enviar) e delayTyping (1-15s "Digitando..."/"Gravando audio...")
-  // Cap server-side defense-in-depth (cliente ja valida 0-15).
-  if (typeof delay_typing === "number" && delay_typing > 0) {
-    zapiBody.delayTyping = Math.min(15, Math.max(1, Math.floor(delay_typing)));
-  }
-  if (typeof delay_message === "number" && delay_message > 0) {
-    zapiBody.delayMessage = Math.min(15, Math.max(1, Math.floor(delay_message)));
-  }
+  // Monta lista de mencoes explicitas; expansao @todos e responsabilidade do adapter buildSend.
+  const mentionedList: string[] = Array.isArray(mentions) ? mentions.filter((m: any): m is string => typeof m === "string") : [];
 
   try {
-    const r = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(zapiBody) });
-    if (!r.ok) throw new Error(`Z-API ${r.status}: ${await r.text()}`);
-    const d = await r.json();
-    const realId = d.messageId ?? d.id ?? `sent-${tempId}`;
+    const provider = getProvider(instance.provider);
+    const outbound: OutboundMessage = {
+      chatId: chat_id,
+      phone,
+      type: message_type,
+      content: content ?? undefined,
+      media: media_url ? { url: media_url, fileName: file_name } : undefined,
+      caption: content ?? undefined,
+      quotedProviderId: resolvedQuotedId,
+      mentions: mentionedList,
+      mentionsEveryone: !!mentions_everyone,
+      isGroup: !!chat.is_group,
+      delayTyping: delay_typing,
+      delayMessage: delay_message,
+    };
+    const built = await provider.buildSend(instance, outbound);
+    const r = await fetch(built.url, { method: built.method, headers: built.headers, body: built.body });
+    if (!r.ok) throw new Error(`${instance.provider} ${r.status}: ${await r.text()}`);
+    const realId = provider.parseSendResult(await r.json()).providerMsgId || `sent-${tempId}`;
     await supabase.from("messages").update({ provider_msg_id: realId, send_status: "sent" }).eq("id", msg!.id);
     return json({ ok: true, message_id: msg!.id, provider_msg_id: realId, agent: agent_name ?? "unknown" });
   } catch (e) {

@@ -1,6 +1,6 @@
 ---
 name: setup
-description: "Instala o WhatsApp Agent do zero — provisiona o Supabase (migrations + edge functions + secrets via Supabase CLI) e configura os serviços externos (Z-API, OpenAI). Use no primeiro setup, depois de clonar o repositorio."
+description: "Instala o WhatsApp Agent do zero — provisiona o Supabase (migrations + edge functions + secrets via Supabase CLI) e configura os serviços externos (Z-API ou Evolution API, OpenAI). Use no primeiro setup, depois de clonar o repositorio."
 argument-hint: "(sem argumentos — conduz o setup interativo)"
 allowed-tools: Bash, Read, Write, Edit
 ---
@@ -16,15 +16,47 @@ Conduza o usuario **passo a passo, uma informacao por vez**, validando cada etap
 
 ## 0. Pre-requisitos
 
-### Contas (todas com plano gratuito pra comecar)
+### 0.1 Escolha do provider de WhatsApp
+
+Antes de continuar, pergunte ao operador qual provider ele vai usar nesta instancia:
+
+| # | Provider | Modelo | Pre-requisito |
+|---|---|---|---|
+| **A** | **Z-API** | SaaS gerenciado | Conta no [z-api.io](https://z-api.io), instancia criada, numero conectado via QR code |
+| **B** | **Evolution API** | Self-hosted | Servidor Evolution rodando com HTTPS publico + apikey configurada |
+
+> **Caminho B — Evolution (self-hosted):** o pre-requisito e ter um servidor Evolution acessivel publicamente (HTTPS). O jeito mais rapido e via docker-compose oficial: <https://github.com/EvolutionAPI/evolution-api/blob/main/docker-compose.yaml>. Este setup **nao** cobre o provisionamento do servidor — assume que ele ja esta no ar com uma `apikey` definida e um HTTPS valido (ex: via Caddy, Nginx, ou Coolify).
+
+Anote a escolha do operador (`zapi` ou `evolution`) — ela vai determinar quais variaveis coletar e quais passos executar nas secoes 1, 4.2 e 5.
+
+---
+
+### 0.2 Contas e dados necessarios
+
+#### Servicos comuns (ambos os providers)
 
 | Servico | O que criar | O que anotar |
 |---|---|---|
 | **[Supabase](https://supabase.com)** | um projeto | project **ref**, **PAT** (Account → Access Tokens), **senha do banco**, **secret key** (Settings → API Keys) |
-| **[Z-API](https://z-api.io)** | uma instancia + conectar o numero (QR code) | `instance_id`, `token`, `client_token` |
 | **[OpenAI](https://platform.openai.com)** | uma API key | `OPENAI_API_KEY` (transcricao de audio) |
 
-### Supabase CLI
+#### Caminho A — Z-API
+
+| Servico | O que criar | O que anotar |
+|---|---|---|
+| **[Z-API](https://z-api.io)** | uma instancia + conectar o numero (QR code) | `instance_id`, `token`, `client_token` |
+
+#### Caminho B — Evolution API
+
+| Item | O que anotar |
+|---|---|
+| Servidor Evolution ja rodando | URL base do servidor (ex: `https://evo.meudominio.com`) |
+| Instancia Evolution | nome da instancia (ex: `minha-instancia`) |
+| Autenticacao | `apikey` configurada no servidor |
+
+---
+
+### 0.3 Supabase CLI
 
 Cheque se ja existe: `supabase --version`. Se nao, instale conforme o OS:
 
@@ -49,7 +81,9 @@ Cheque se ja existe: `supabase --version`. Se nao, instale conforme o OS:
 
 ## 1. Credenciais → `.env`
 
-Crie/edite o `.env` na raiz do repo (ja e gitignored) com o que o usuario fornecer:
+Crie/edite o `.env` na raiz do repo (ja e gitignored) com o que o usuario fornecer.
+
+### Caminho A — Z-API
 
 ```
 SUPABASE_ACCESS_TOKEN=sbp_...        # PAT — Account → Access Tokens
@@ -60,6 +94,20 @@ SUPABASE_DB_PASSWORD=...             # senha do banco (pro db push)
 ZAPI_INSTANCE_ID=...
 ZAPI_TOKEN=...
 ZAPI_CLIENT_TOKEN=...
+OPENAI_API_KEY=sk-...
+```
+
+### Caminho B — Evolution API
+
+```
+SUPABASE_ACCESS_TOKEN=sbp_...        # PAT — Account → Access Tokens
+SUPABASE_PROJECT_REF=...             # ref do projeto (ex: abcdwxyzab)
+SUPABASE_SECRET_KEY=sb_secret_...    # Settings → API Keys (chave nova)
+SUPABASE_SERVICE_ROLE_KEY=eyJ...     # service_role JWT (Settings → API Keys → Legacy) — vai pro Vault (cron interno)
+SUPABASE_DB_PASSWORD=...             # senha do banco (pro db push)
+EVO_BASE_URL=https://...             # URL base do servidor Evolution (sem barra final)
+EVO_INSTANCE=...                     # nome da instancia no servidor Evolution
+EVO_APIKEY=...                       # apikey do servidor Evolution
 OPENAI_API_KEY=sk-...
 ```
 
@@ -92,16 +140,60 @@ curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/dat
 
 > Em **re-setup** (secret já existe), troque `vault.create_secret(valor, nome)` por `vault.update_secret(id, valor)` — pegue o `id` em `select id, name from vault.secrets`. Enquanto o Vault estiver vazio, os jobs apenas emitem um `NOTICE` e não disparam (não quebram nada).
 
+### 2.2 Registrar a instancia em `wa_instance`
+
+Apos o `db push`, insira a linha da instancia na tabela `wa_instance`. Escolha o bloco do seu provider:
+
+#### Caminho A — Z-API
+
+```bash
+SQL="INSERT INTO wa_instance (provider, instance_id, auth_token, client_token, webhook_url, is_default, is_active)
+     VALUES ('zapi', '<ZAPI_INSTANCE_ID>', '<ZAPI_TOKEN>', '<ZAPI_CLIENT_TOKEN>',
+             'https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/process-webhook',
+             true, true);" # alias: coluna opcional para rótulo amigável
+curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"
+```
+
+> `base_url` fica `NULL` (Z-API nao precisa — o endpoint e construido a partir do `instance_id`/`auth_token`).
+
+#### Caminho B — Evolution API
+
+```bash
+SQL="INSERT INTO wa_instance (provider, instance_id, base_url, auth_token, webhook_url, is_default, is_active)
+     VALUES ('evolution', '<EVO_INSTANCE>', '<EVO_BASE_URL>', '<EVO_APIKEY>',
+             'https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/process-webhook',
+             true, true);" # alias: coluna opcional para rótulo amigável
+curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"
+```
+
+> `client_token` fica `NULL` (Evolution nao usa esse campo — a autenticacao e so a `apikey` em `auth_token`).
+
 ---
 
 ## 3. Secrets das edge functions
 
-Gere um `MCP_API_KEY` aleatorio (32+ chars; ele e a chave que protege a `mcp-api`) e configure todos os secrets de uma vez:
+Gere um `MCP_API_KEY` aleatorio (32+ chars; ele e a chave que protege a `mcp-api`) e configure todos os secrets de uma vez.
+
+### Caminho A — Z-API
 
 ```bash
 supabase secrets set --project-ref <SUPABASE_PROJECT_REF> \
   MCP_API_KEY=<aleatorio> \
   ZAPI_INSTANCE_ID=... ZAPI_TOKEN=... ZAPI_CLIENT_TOKEN=... \
+  OPENAI_API_KEY=sk-... \
+  INTERNAL_EDGE_JWT=<SUPABASE_SERVICE_ROLE_KEY>
+```
+
+### Caminho B — Evolution API
+
+```bash
+supabase secrets set --project-ref <SUPABASE_PROJECT_REF> \
+  MCP_API_KEY=<aleatorio> \
+  EVO_BASE_URL=... EVO_INSTANCE=... EVO_APIKEY=... \
   OPENAI_API_KEY=sk-... \
   INTERNAL_EDGE_JWT=<SUPABASE_SERVICE_ROLE_KEY>
 ```
@@ -124,7 +216,9 @@ Confirme: `supabase functions list --project-ref <ref>` — todas `ACTIVE`.
 
 ---
 
-## 5. Webhook da Z-API
+## 5. Webhook do provider de WhatsApp
+
+### Caminho A — Z-API
 
 Aponte os webhooks da instancia pro `process-webhook` **e** ligue a notificacao de mensagens **enviadas por voce** — sem o ultimo passo, so as mensagens recebidas entram no banco (as que voce envia ficam de fora). Tres chamadas (use `ZAPI_INSTANCE_ID`/`ZAPI_TOKEN`/`ZAPI_CLIENT_TOKEN` do `.env`):
 
@@ -141,6 +235,62 @@ curl -s -X PUT "$ZBASE/update-notify-sent-by-me" -H "Client-Token: $ZAPI_CLIENT_
 ```
 
 Confirme em `GET $ZBASE/me` (header `Client-Token`): `receivedCallbackUrl`/`deliveryCallbackUrl` apontando pro `process-webhook` **e `receiveCallbackSentByMe: true`**.
+
+> A instancia ja foi registrada em `wa_instance` no passo 2.2, com `webhook_url` apontando pro mesmo `process-webhook`.
+
+---
+
+### Caminho B — Evolution API
+
+Configure o webhook da instancia via a API do servidor Evolution. O `WEBHOOK_SECRET` abaixo deve ser o valor do campo `webhook_token` da linha inserida em `wa_instance` (passo 2.2) — se voce ainda nao definiu um token, atualize a linha agora:
+
+```bash
+# (opcional) definir/atualizar o webhook_token na linha da instancia
+SQL="UPDATE wa_instance SET webhook_token = '<WEBHOOK_SECRET>' WHERE instance_id = '<EVO_INSTANCE>';"
+curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"
+```
+
+Em seguida, registre o webhook no servidor Evolution:
+
+```bash
+HOOK="https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/process-webhook"
+EVO_BASE="$EVO_BASE_URL"   # sem barra final
+EVO_INSTANCE="<EVO_INSTANCE>"
+EVO_APIKEY="<EVO_APIKEY>"
+WEBHOOK_SECRET="<WEBHOOK_SECRET>"   # mesmo valor de webhook_token em wa_instance
+
+curl -s -X POST "$EVO_BASE/webhook/set/$EVO_INSTANCE" \
+  -H "apikey: $EVO_APIKEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "webhook": {
+      "enabled": true,
+      "url": "'"$HOOK"'",
+      "byEvents": false,
+      "base64": false,
+      "headers": {
+        "authorization": "Bearer '"$WEBHOOK_SECRET"'",
+        "Content-Type": "application/json"
+      },
+      "events": [
+        "MESSAGES_UPSERT",
+        "MESSAGES_UPDATE",
+        "MESSAGES_DELETE",
+        "SEND_MESSAGE",
+        "CONNECTION_UPDATE",
+        "CONTACTS_UPDATE",
+        "GROUPS_UPSERT",
+        "GROUP_PARTICIPANTS_UPDATE"
+      ]
+    }
+  }'
+```
+
+Confirme com `GET $EVO_BASE/webhook/find/$EVO_INSTANCE -H "apikey: $EVO_APIKEY"` — o campo `webhook.url` deve apontar pro `process-webhook` e `webhook.enabled` deve ser `true`.
+
+> O header `authorization: Bearer <WEBHOOK_SECRET>` e validado pelo `process-webhook` quando `WEBHOOK_REQUIRE_AUTH=true` esta setado nos secrets da edge function. Se ainda nao configurou essa variavel, adicione-a: `supabase secrets set --project-ref <REF> WEBHOOK_REQUIRE_AUTH=true`.
 
 ---
 
@@ -179,7 +329,7 @@ O backend esta no ar. Escolha o caminho conforme o harness:
 
 ## 8. Smoke test
 
-Com o MCP conectado, chame a tool **`status`** — deve retornar a conexao Z-API e contagem de mensagens. Ou direto por HTTP (caminho Claude Code, com a chave):
+Com o MCP conectado, chame a tool **`status`** — deve retornar a conexao do provider e contagem de mensagens. Ou direto por HTTP (caminho Claude Code, com a chave):
 
 ```bash
 curl -s -X POST "https://<ref>.supabase.co/functions/v1/mcp-api" \
@@ -214,4 +364,4 @@ Feche com uma orientação assim:
 
 > Pronto. Esse servidor MCP funciona em **qualquer app de IA com suporte a MCP**. Em apps de chat, adicione a **URL** como connector e cole o **Client ID + Client Secret** nas *Advanced settings*. Em apps que aceitam header (Claude Code), use a **chave `x-mcp-key`**. **Guarde o Client Secret num gerenciador** — é o seu acesso ao MCP.
 
-Resuma também o que ficou configurado e aponte qualquer pendencia (ex.: numero Z-API ainda nao conectado, `OPENAI_API_KEY` ausente).
+Resuma também o que ficou configurado e aponte qualquer pendencia (ex.: numero ainda nao conectado ao provider, `OPENAI_API_KEY` ausente).

@@ -1,0 +1,21 @@
+{
+  "type": "ReceivedCallback",
+  "instanceId": "INST123",
+  "messageId": "3EB0A1234567890ABCDF",
+  "phone": "5511999991234",
+  "senderName": "John Doe",
+  "momment": 1720000002000,
+  "fromMe": false,
+  "waitingMessage": false,
+  "isGroup": false,
+  "isCommunity": false,
+  "forwarded": false,
+  "image": {
+    "imageUrl": "https://media.z-api.io/img/sample.jpg",
+    "mimeType": "image/jpeg",
+    "caption": "Veja essa foto",
+    "width": 1280,
+    "height": 720,
+    "thumbnailUrl": "https://media.z-api.io/img/sample-thumb.jpg"
+  }
+}

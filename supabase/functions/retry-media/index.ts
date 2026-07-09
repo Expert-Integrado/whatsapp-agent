@@ -3,6 +3,9 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
 Deno.serve(async (_req) => {
+  // Filtra apenas linhas com original_url (Z-API). Evolution armazena a mídia
+  // diretamente no Storage no webhook, portanto download_status já é "done"
+  // e original_url é NULL — retry-media não precisa fazer nada por essas linhas.
   const { data: pending } = await supabase.from("message_media").select("id, original_url, storage_bucket, storage_path, mime_type").eq("download_status", "pending").not("original_url", "is", null).order("created_at", { ascending: true }).limit(50);
   let done = 0, failed = 0;
   for (const m of (pending ?? [])) {

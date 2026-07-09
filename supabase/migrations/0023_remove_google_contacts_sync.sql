@@ -15,7 +15,11 @@
 BEGIN;
 
 -- 1) Remover cron job
-SELECT cron.unschedule('sync-google-contacts');
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'sync-google-contacts') THEN
+    PERFORM cron.unschedule('sync-google-contacts');
+  END IF;
+END $$;
 
 -- 2) Drop tabelas
 DROP TABLE IF EXISTS public.contacts CASCADE;

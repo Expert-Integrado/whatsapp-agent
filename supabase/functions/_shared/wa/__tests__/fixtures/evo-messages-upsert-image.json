@@ -1,0 +1,29 @@
+{
+  "event": "messages.upsert",
+  "instance": "you_casa",
+  "data": {
+    "key": {
+      "remoteJid": "558192030166@s.whatsapp.net",
+      "remoteJidAlt": "558192030166@s.whatsapp.net",
+      "fromMe": false,
+      "id": "3EB041E7E371837D3775CC",
+      "participant": "",
+      "addressingMode": "user"
+    },
+    "pushName": "Asafe Silva",
+    "status": "DELIVERY_ACK",
+    "message": {
+      "imageMessage": {
+        "mimetype": "image/jpeg",
+        "caption": "Veja essa imagem",
+        "contextInfo": {
+          "stanzaId": "QUOTED_MSG_ID_001"
+        }
+      }
+    },
+    "messageType": "imageMessage",
+    "messageTimestamp": 1781039100
+  },
+  "server_url": "https://evo.example.com",
+  "apikey": "APIKEY123"
+}

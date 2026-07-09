@@ -152,7 +152,7 @@ async function resolveInstance() {
     console.error('corpus exige --instance <alias|instance_id> (rodar só na instância certa é de propósito).');
     process.exit(1);
   }
-  const rows = await sb('zapi_instance?select=instance_id,alias,is_default');
+  const rows = await sb('wa_instance?select=instance_id,alias,is_default');
   const inst = rows.find((r) => r.alias === key || r.instance_id === key);
   if (!inst) {
     console.error(`Instância "${key}" não encontrada. Disponíveis: ${rows.map((r) => r.alias || r.instance_id).join(', ')}`);

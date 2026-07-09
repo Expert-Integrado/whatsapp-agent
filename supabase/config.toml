@@ -22,3 +22,6 @@ verify_jwt = true
 
 [functions.transcribe-queue]
 verify_jwt = true
+
+[functions.wa-proxy]
+verify_jwt = true
