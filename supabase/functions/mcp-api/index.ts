@@ -1208,7 +1208,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "read",
-    description: "Le as mensagens de uma conversa em ordem cronologica e JA transcreve os audios pendentes (Whisper) — use pra 'transcreve/resume a conversa com X' ou 'o que o fulano mandou'. 'chat' aceita nome, telefone ou chat_id; se ambiguo, retorna candidatos. Cada audio vem com o campo transcription. Se o chat tiver voice_profile, ele vem na resposta: ESPELHE como_me_chama/girias/registro ao redigir pra esse contato (soma ao voice guide global).",
+    description: "Le as mensagens de uma conversa em ordem cronologica e JA transcreve os audios pendentes (Whisper) — use pra 'transcreve/resume a conversa com X' ou 'o que o fulano mandou'. 'chat' aceita nome, telefone ou chat_id; se ambiguo, retorna candidatos. Cada audio vem com o campo transcription. Se o chat tiver voice_profile, ele vem na resposta: ESPELHE ao redigir pra esse contato — chame a pessoa pelos vocativos de como_chamo (como o dono a chama), e module intimidade pelo como_me_chama/girias/registro dela (soma ao voice guide global).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1223,7 +1223,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "send",
-    description: "Envia mensagem (texto ou midia) pra contato/grupo. FLUXO OBRIGATORIO: 1a chamada SEM confirmed (mostra destinatario+conteudo e bloqueia); 2a com confirmed:true apos o usuario confirmar. 'to' aceita nome/telefone/chat_id. Antes de redigir, leia o chat (read): se houver voice_profile, espelhe o vocativo e as girias do contato.",
+    description: "Envia mensagem (texto ou midia) pra contato/grupo. FLUXO OBRIGATORIO: 1a chamada SEM confirmed (mostra destinatario+conteudo e bloqueia); 2a com confirmed:true apos o usuario confirmar. 'to' aceita nome/telefone/chat_id. Antes de redigir, leia o chat (read): se houver voice_profile, chame a pessoa pelo vocativo de como_chamo e espelhe as girias/registro dela.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1365,14 +1365,14 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "annotate_chat",
-    description: "Salva observacoes, links e/ou voice_profile de um contato/grupo (aparecem no read). Passe so o campo que quer atualizar. ATENCAO: observations e links SUBSTITUEM o valor inteiro; voice_profile faz MERGE RASO por chave de topo (atualizar girias preserva como_me_chama; arrays substituem; chave null remove; voice_profile:null limpa tudo). Ao notar vocativo ou giria nova numa conversa, atualize o voice_profile com fonte:'incremental'.",
+    description: "Salva observacoes, links e/ou voice_profile de um contato/grupo (aparecem no read). Passe so o campo que quer atualizar. ATENCAO: observations e links SUBSTITUEM o valor inteiro; voice_profile faz MERGE RASO por chave de topo (atualizar girias preserva como_me_chama/como_chamo; arrays substituem; chave null remove; voice_profile:null limpa tudo). Ao notar vocativo ou giria nova numa conversa, atualize o voice_profile com fonte:'incremental'.",
     inputSchema: {
       type: "object",
       properties: {
         chat: { type: "string", description: "Nome, telefone ou chat_id" },
         observations: { type: "string", description: "Texto livre com contexto do contato (substitui o valor atual inteiro)" },
         links: { type: "array", items: { type: "object", properties: { label: { type: "string" }, url: { type: "string" } }, required: ["label", "url"] }, description: "Links relevantes ({label, url})" },
-        voice_profile: { type: "object", description: "Perfil de voz do contato: { como_me_chama: string[], girias: string[], registro: string (1 linha), exemplos: string[] (2-3 citacoes <=80 chars), confianca: 'alta'|'media'|'baixa', fonte: 'backfill'|'manual'|'incremental' }. Merge raso — mande so as chaves que mudam. analisado_em e carimbado automaticamente.", additionalProperties: true },
+        voice_profile: { type: "object", description: "Perfil de voz do contato: { como_me_chama: string[] (vocativos que a pessoa usa com o dono), como_chamo: string[] (vocativos que o dono usa com ela — extrair SO de mensagem autentica do dono, nunca de msg de agente), girias: string[], registro: string (1 linha), exemplos: string[] (2-3 citacoes <=80 chars), confianca: 'alta'|'media'|'baixa', fonte: 'backfill'|'manual'|'incremental' }. Merge raso — mande so as chaves que mudam. analisado_em e carimbado automaticamente.", additionalProperties: true },
         brain_contact_id: { type: "string", description: "Id do contato no vault Expert Brain (expert-contacts) pra vinculo nativo chat<->contato. null desvincula. So vincule id verificado (get_contact_by_phone), nunca chute." },
         instance: { type: "string", description: "Instancia (alias ou instance_id)" },
       },

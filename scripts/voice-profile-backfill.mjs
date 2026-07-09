@@ -12,9 +12,15 @@
 // relevante em grupos entra mesmo assim (dm_thin: true — pedido do dono 09/07).
 //
 // `corpus` monta, por contato com conversa PRIVADA, o material bruto pra sessão do
-// agente extrair: como a pessoa chama o dono (vocativo => intimidade) + gírias/registro.
-// Junta DMs inbound + varredura longitudinal de vocativos + evidência em GRUPOS
-// (mensagens do mesmo telefone, priorizando replies ao dono). Read-only.
+// agente extrair: como a pessoa chama o dono (vocativo => intimidade) + gírias/registro
+// + como o DONO chama a pessoa (como_chamo, pedido 09/07). Junta DMs inbound +
+// varredura longitudinal de vocativos + OUTBOUND AUTÊNTICO do dono + evidência em
+// GRUPOS (mensagens do mesmo telefone, priorizando replies ao dono). Read-only.
+//
+// Autenticidade do outbound (como_chamo aprende a voz do DONO, nunca do agente):
+//   1. sent_by_agent=false no filtro (pós-0037 cobre também fromApi do webhook);
+//   2. raw_payload.fromApi='true' excluído em JS (cinto e suspensório);
+//   3. fromApi AUSENTE (histórico importado) só vale antes de 2026-04-15 (pré-agente).
 //
 // `commit` grava os perfis analisados em chats.voice_profile DEPOIS da revisão.
 // Separar leitura e commit é de propósito (mesmo padrão do nurture-digest): se a
@@ -27,6 +33,7 @@
 // Caps (env-overridable):
 //   VP_CONTACT_CAP (default 50 contatos por rodada, por recência)
 //   VP_MSG_CAP     (default 150 DMs inbound por contato, mais recentes)
+//   VP_OUT_CAP     (default 80 outbound autênticas do dono mantidas por contato)
 //   VP_VOC_CAP     (default 30 hits da varredura de vocativos, mais antigos primeiro)
 //   VP_GROUP_CAP   (default 100 msgs de grupo puxadas; ~40 mantidas após priorização)
 
@@ -43,6 +50,7 @@ const hasFlag = (flag) => process.argv.includes(flag);
 
 const CONTACT_CAP = parseInt(argOf('--limit') || process.env.VP_CONTACT_CAP || '50', 10);
 const MSG_CAP = parseInt(process.env.VP_MSG_CAP || '150', 10);
+const OUT_CAP = parseInt(process.env.VP_OUT_CAP || '80', 10);
 const VOC_CAP = parseInt(process.env.VP_VOC_CAP || '30', 10);
 const GROUP_CAP = parseInt(process.env.VP_GROUP_CAP || '100', 10);
 const GROUP_KEEP = 40;
@@ -104,6 +112,12 @@ function normalizePhoneBR(digits) {
   }
   return Array.from(out);
 }
+
+// Msg do dono digitada no aparelho: fromApi explícito 'false', ou histórico
+// importado (fromApi ausente) anterior à conexão do primeiro agente.
+const CUTOFF_PRE_AGENT = '2026-04-15';
+const isAuthenticOwner = (m) =>
+  m.from_api === 'false' || (m.from_api == null && m.message_ts < CUTOFF_PRE_AGENT);
 
 const cleanText = (m) => ((m.content || m.caption || '').trim()).slice(0, CONTENT_MAX);
 const isUseful = (m, text) =>
@@ -205,6 +219,34 @@ async function corpus() {
     );
     const vocativeHits = vocRaw.map((m) => ({ ts: m.message_ts, text: (m.content || '').trim().slice(0, CONTENT_MAX) }));
 
+    // OUTBOUND autêntico do dono (aprende como_chamo). Puxa com folga (x2): parte
+    // cai no filtro de autenticidade (fromApi ausente pós-cutoff).
+    const outRaw = await sb(
+      `messages?select=message_ts,message_type,content,caption,from_api:raw_payload->>fromApi` +
+      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=${inList(dmIds)}` +
+      `&from_me=eq.true&is_deleted=eq.false&sent_by_agent=eq.false` +
+      `&order=message_ts.desc&limit=${OUT_CAP * 2}`
+    );
+    const outMsgs = outRaw
+      .filter((m) => m.from_api !== 'true' && isAuthenticOwner(m))
+      .map((m) => ({ ts: m.message_ts, type: m.message_type, text: cleanText(m), _m: m }))
+      .filter((m) => isUseful(m._m, m.text))
+      .map(({ _m, ...m }) => m)
+      .slice(0, OUT_CAP)
+      .reverse();
+
+    // Varredura longitudinal de vocativos TAMBÉM no outbound (apelido antigo que o
+    // dono usava com a pessoa; asc pega o começo da relação, quase sempre pré-agente)
+    const outVocRaw = await sb(
+      `messages?select=message_ts,content,from_api:raw_payload->>fromApi` +
+      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=${inList(dmIds)}` +
+      `&from_me=eq.true&is_deleted=eq.false&sent_by_agent=eq.false&or=${orVoc}` +
+      `&order=message_ts.asc&limit=${VOC_CAP}`
+    );
+    const outVocativeHits = outVocRaw
+      .filter((m) => m.from_api !== 'true' && isAuthenticOwner(m))
+      .map((m) => ({ ts: m.message_ts, text: (m.content || '').trim().slice(0, CONTENT_MAX) }));
+
     // Evidência em grupos: mensagens do mesmo telefone em qualquer grupo da instância
     const groupRaw = await sb(
       `v_messages_with_sender?select=chat_id,chat_display_name,message_ts,message_type,content,caption,quoted_msg_id` +
@@ -253,10 +295,12 @@ async function corpus() {
       dm_thin: dmThin,
       dm_msgs: dmMsgs,
       vocative_hits: vocativeHits,
+      owner_msgs: outMsgs,
+      owner_vocative_hits: outVocativeHits,
       group_msgs: groupMsgs,
-      stats: { dm_fetched: dmRaw.length, dm_kept: dmMsgs.length, dm_truncated: dmRaw.length === MSG_CAP, group_kept: groupMsgs.length },
+      stats: { dm_fetched: dmRaw.length, dm_kept: dmMsgs.length, dm_truncated: dmRaw.length === MSG_CAP, owner_kept: outMsgs.length, group_kept: groupMsgs.length },
     });
-    console.error(`corpus: ${t.chat_name || t.chat_id} — ${dmMsgs.length} DM${dmThin ? ' (fraca, resgate por grupo)' : ''}, ${vocativeHits.length} vocativo-hit, ${groupMsgs.length} grupo`);
+    console.error(`corpus: ${t.chat_name || t.chat_id} — ${dmMsgs.length} DM${dmThin ? ' (fraca, resgate por grupo)' : ''}, ${outMsgs.length} dono, ${vocativeHits.length} vocativo-hit, ${groupMsgs.length} grupo`);
   }
 
   const files = [];
@@ -293,8 +337,8 @@ async function commit() {
       console.error(`commit: linha inválida (exige instance_id, chat_id, voice_profile objeto): ${JSON.stringify(r).slice(0, 160)}`);
       failed++; continue;
     }
-    if (!vp.como_me_chama?.length && !vp.girias?.length && !vp.registro) {
-      console.error(`commit: ${r.chat_id} sem conteúdo (como_me_chama/girias/registro vazios) — pulado.`);
+    if (!vp.como_me_chama?.length && !vp.como_chamo?.length && !vp.girias?.length && !vp.registro) {
+      console.error(`commit: ${r.chat_id} sem conteúdo (como_me_chama/como_chamo/girias/registro vazios) — pulado.`);
       failed++; continue;
     }
     const key = `instance_id=eq.${encodeURIComponent(r.instance_id)}&chat_id=eq.${encodeURIComponent(r.chat_id)}`;
