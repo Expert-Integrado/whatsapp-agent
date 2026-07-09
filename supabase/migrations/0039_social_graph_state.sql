@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════
--- 0035 — social_graph_state: cursor do grafo social de interações
+-- 0039 — social_graph_state: cursor do grafo social de interações
 --
 -- O script scripts/social-graph.mjs lê replies diretos em grupos
 -- (quoted_msg_id), agrega pares "quem conversa com quem" e empurra
