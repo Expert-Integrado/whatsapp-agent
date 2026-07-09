@@ -3,6 +3,17 @@
 //
 //   node scripts/nurture-digest.mjs digest [--since 2026-01-01T00:00:00Z] [--out arquivo.json]
 //   node scripts/nurture-digest.mjs commit --file resultados.json
+//   node scripts/nurture-digest.mjs history --phone 5511900000000 [--out arquivo.json]
+//   node scripts/nurture-digest.mjs backfill-status --phones 5511...,5521...
+//   node scripts/nurture-digest.mjs backfill-done --phone 5511... --entity <id> --msgs 123
+//
+// `history` varre o histórico COMPLETO de um telefone: chats privados dele
+// (inclusive chat fantasma @lid, achado pelo campo phone) + tudo que ele falou
+// em grupos (sender_phone). É o insumo do backfill ("nutrir o passado") e da
+// varredura disparada quando um contato novo entra no vault. Read-only.
+//
+// `backfill-status`/`backfill-done` controlam quem já foi varrido (tabela
+// nurture_backfill) — a varredura de histórico roda UMA vez por contato.
 //
 // `digest` lê as mensagens NOVAS de cada chat com atividade (cursor incremental na
 // tabela nurture_state; sem cursor, janela default de 24h) e imprime um JSON compacto
@@ -66,7 +77,8 @@ async function sb(pathAndQuery, opts = {}) {
     },
   });
   if (!res.ok) throw new Error(`Supabase ${pathAndQuery} → ${res.status}: ${await res.text()}`);
-  return res.status === 204 ? null : res.json();
+  const text = await res.text();
+  return text ? JSON.parse(text) : null; // return=minimal responde 201 com corpo vazio
 }
 
 // --- digest ---
@@ -171,6 +183,146 @@ async function digest() {
   }
 }
 
+// --- history: varredura completa de um telefone (backfill / contato novo) ---
+const HIST_PRIV_CAP = parseInt(process.env.NURTURE_HIST_PRIV_CAP || '1000', 10); // msgs por chat privado
+const HIST_GROUP_CAP = parseInt(process.env.NURTURE_HIST_GROUP_CAP || '800', 10); // falas em grupos, total
+
+// 9o dígito BR: 5511 + 8 dígitos ganha variante com 9; com 9, variante sem.
+function phoneVariants(p) {
+  const v = new Set([p]);
+  if (p.startsWith('55')) {
+    if (p.length === 12) v.add(p.slice(0, 4) + '9' + p.slice(4));
+    if (p.length === 13 && p[4] === '9') v.add(p.slice(0, 4) + p.slice(5));
+  }
+  return [...v];
+}
+
+const toMsg = (m) => ({
+  ts: m.message_ts,
+  from_me: m.from_me,
+  text: ((m.content || m.caption || '').trim()).slice(0, CONTENT_MAX),
+});
+
+// Página pequena: transcrição de áudio é TOAST pesado — página grande estoura
+// o statement timeout do PostgREST.
+const HIST_PAGE = 200;
+async function pagedMessages(baseQuery, cap) {
+  const out = [];
+  let cursor = null;
+  while (out.length < cap) {
+    const page = await sb(
+      `${baseQuery}${cursor ? `&message_ts=gt.${encodeURIComponent(cursor)}` : ''}` +
+      `&order=message_ts.asc&limit=${Math.min(HIST_PAGE, cap - out.length)}`
+    );
+    out.push(...page);
+    if (page.length < HIST_PAGE) return { rows: out, truncated: false };
+    cursor = page[page.length - 1].message_ts;
+  }
+  return { rows: out, truncated: true };
+}
+
+async function history() {
+  const phone = argOf('--phone');
+  if (!phone || !/^\d{8,15}$/.test(phone)) {
+    console.error('history exige --phone <E.164 sem +>');
+    process.exit(1);
+  }
+  const variants = phoneVariants(phone);
+  const inList = `in.(${variants.map((v) => `"${v}"`).join(',')})`;
+
+  // Chats privados do número (o campo phone também acha o chat fantasma @lid)
+  const privChats = await sb(
+    `chats?select=instance_id,chat_id,chat_name,phone&phone=${inList}&is_group=eq.false`
+  );
+  const privOut = [];
+  for (const c of privChats) {
+    const { rows, truncated } = await pagedMessages(
+      `messages?select=message_ts,from_me,content,caption` +
+      `&instance_id=eq.${encodeURIComponent(c.instance_id)}&chat_id=eq.${encodeURIComponent(c.chat_id)}` +
+      `&is_deleted=eq.false`,
+      HIST_PRIV_CAP
+    );
+    const kept = rows.map(toMsg).filter((m) => m.text.length > 0);
+    if (kept.length) privOut.push({
+      chat_name: c.chat_name, chat_id: c.chat_id,
+      truncated, messages: kept,
+    });
+  }
+
+  // Falas do número em grupos (só o que ELE disse; contexto vem do nome do grupo)
+  const { rows: groupMsgs, truncated: groupTruncated } = await pagedMessages(
+    `messages?select=message_ts,from_me,content,caption,chat_id,sender_name` +
+    `&sender_phone=${inList}&from_me=eq.false&is_deleted=eq.false`,
+    HIST_GROUP_CAP
+  );
+  const privIds = new Set(privChats.map((c) => c.chat_id));
+  const inGroups = groupMsgs.filter((m) => !privIds.has(m.chat_id));
+  const groupNames = new Map();
+  if (inGroups.length) {
+    const ids = [...new Set(inGroups.map((m) => m.chat_id))];
+    const rows = await sb(
+      `chats?select=chat_id,chat_name&chat_id=in.(${ids.map((i) => `"${i}"`).join(',')})`
+    );
+    for (const r of rows) groupNames.set(r.chat_id, r.chat_name);
+  }
+  const byGroup = new Map();
+  for (const m of inGroups) {
+    const g = byGroup.get(m.chat_id) || { chat_name: groupNames.get(m.chat_id) || m.chat_id, chat_id: m.chat_id, messages: [] };
+    const km = toMsg(m);
+    if (km.text.length) g.messages.push(km);
+    byGroup.set(m.chat_id, g);
+  }
+
+  const groups = [...byGroup.values()].filter((g) => g.messages.length > 0);
+  const total = privOut.reduce((n, c) => n + c.messages.length, 0) +
+    groups.reduce((n, g) => n + g.messages.length, 0);
+  const payload = {
+    phone, variants, generated_at: new Date().toISOString(),
+    total_messages: total,
+    group_truncated: groupTruncated,
+    private_chats: privOut, groups,
+  };
+  const outFile = argOf('--out');
+  const json = JSON.stringify(payload, null, 2);
+  if (outFile) {
+    writeFileSync(outFile, json);
+    console.error(`history ${phone}: ${total} mensagem(ns) (${privOut.length} chat(s) privado(s), ${groups.length} grupo(s)) → ${outFile}`);
+  } else {
+    console.log(json);
+  }
+}
+
+// --- backfill-status / backfill-done: controle de quem já foi varrido ---
+async function backfillStatus() {
+  const phones = (argOf('--phones') || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!phones.length) {
+    console.error('backfill-status exige --phones a,b,c');
+    process.exit(1);
+  }
+  const rows = await sb(`nurture_backfill?select=phone&phone=in.(${phones.map((p) => `"${p}"`).join(',')})`);
+  const done = new Set(rows.map((r) => r.phone));
+  console.log(JSON.stringify({ done: [...done], pending: phones.filter((p) => !done.has(p)) }));
+}
+
+async function backfillDone() {
+  const phone = argOf('--phone');
+  const entity = argOf('--entity');
+  if (!phone || !entity) {
+    console.error('backfill-done exige --phone e --entity (id no vault); --msgs opcional');
+    process.exit(1);
+  }
+  await sb('nurture_backfill?on_conflict=phone', {
+    method: 'POST',
+    headers: { prefer: 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify([{
+      phone, entity_id: entity,
+      done_at: new Date().toISOString(),
+      msgs_read: parseInt(argOf('--msgs') || '0', 10),
+    }]),
+  });
+  console.error(`backfill-done: ${phone} marcado.`);
+}
+
 // --- commit ---
 async function commit() {
   const file = argOf('--file');
@@ -206,7 +358,10 @@ async function commit() {
 
 if (MODE === 'digest') await digest();
 else if (MODE === 'commit') await commit();
+else if (MODE === 'history') await history();
+else if (MODE === 'backfill-status') await backfillStatus();
+else if (MODE === 'backfill-done') await backfillDone();
 else {
-  console.error('Uso: nurture-digest.mjs digest [--since ISO] [--out arquivo.json] | commit --file resultados.json');
+  console.error('Uso: nurture-digest.mjs digest [--since ISO] [--out arquivo.json] | commit --file resultados.json | history --phone <fone> [--out arquivo.json] | backfill-status --phones a,b | backfill-done --phone <fone> --entity <id> [--msgs N]');
   process.exit(1);
 }
