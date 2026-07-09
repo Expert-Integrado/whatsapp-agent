@@ -200,6 +200,10 @@ async function corpus() {
       `&order=message_ts.desc&limit=${GROUP_CAP}`
     );
     // Quais respondem ao dono? (quoted_msg_id casando com msg from_me)
+    // LIMITAÇÃO conhecida (verificado em prod 09/07/2026): o webhook grava quoted_msg_id
+    // num espaço de id que NÃO bate com provider_msg_id — reply_to_me hoje nunca acende.
+    // Mantido porque é barato e passa a funcionar se o webhook corrigir o id; a evidência
+    // de grupo que vale é a MENÇÃO EXPLÍCITA ao dono (regra da skill).
     const quotedIds = [...new Set(groupRaw.map((m) => m.quoted_msg_id).filter(Boolean))];
     const mineQuoted = new Set();
     for (let i = 0; i < quotedIds.length; i += 100) {
