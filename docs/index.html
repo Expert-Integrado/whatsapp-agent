@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<title>WhatsApp Agent — como funciona</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Como o WhatsApp Agent funciona: um backend headless que conecta o seu número de WhatsApp ao Claude via MCP — captura tudo, transcreve áudios e responde por você, no seu Supabase.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%AC%3C/text%3E%3C/svg%3E">
+
+<style>
+  :root{
+    --bg: #0a1210;
+    --bg-raised: #0e1815;
+    --bg-card: #111d19;
+    --line: #1e2f29;
+    --line-soft: #182620;
+    --ink: #e9f0ed;
+    --ink-dim: #a5b5ae;
+    --ink-faint: #6d7f77;
+    --accent: #5be08a;
+    --accent-dim: #3aa663;
+    --accent-2: #7aa2ff;
+    --accent-2-dim: #4f6bc4;
+    --warn: #f2b866;
+    --radius: 14px;
+    --maxw: 1080px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  *{ box-sizing: border-box; }
+  html{ scroll-behavior: smooth; }
+
+  body{
+    margin:0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    background-image:
+      radial-gradient(1200px 600px at 15% -10%, rgba(91,224,138,.08), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(122,162,255,.06), transparent 55%);
+    background-repeat: no-repeat;
+  }
+
+  ::selection{ background: rgba(91,224,138,.28); color: #fff; }
+
+  a{ color: var(--accent); text-decoration: none; }
+  a:hover{ text-decoration: underline; }
+
+  .wrap{ max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+  section{ padding: 96px 0; border-top: 1px solid var(--line-soft); }
+  section:first-of-type{ border-top: none; }
+
+  .eyebrow{
+    display:inline-flex; align-items:center; gap:8px;
+    font-size: 12.5px; letter-spacing:.14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 700;
+    margin: 0 0 14px;
+  }
+  .eyebrow::before{ content:""; width:7px; height:7px; border-radius:50%; background: var(--accent); box-shadow: 0 0 0 4px rgba(91,224,138,.15); }
+
+  h1,h2,h3{ font-weight: 750; letter-spacing: -0.02em; margin: 0; }
+  h2{ font-size: clamp(1.7rem, 3vw, 2.35rem); color: var(--ink); }
+  .section-sub{ color: var(--ink-dim); max-width: 660px; margin: 14px 0 0; font-size: 1.05rem; }
+  .section-head{ margin-bottom: 48px; }
+
+  code, .mono{ font-family: var(--mono); }
+  code{
+    background: rgba(91,224,138,.1);
+    color: var(--accent);
+    padding: .12em .42em;
+    border-radius: 5px;
+    font-size: .88em;
+    border: 1px solid rgba(91,224,138,.18);
+  }
+
+  /* ---------- NAV ---------- */
+  .topnav{
+    position: sticky; top:0; z-index: 50;
+    backdrop-filter: blur(10px);
+    background: rgba(10,18,16,.72);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .topnav .wrap{ display:flex; align-items:center; justify-content:space-between; height: 60px; }
+  .brand{ display:flex; align-items:center; gap:10px; font-weight:800; color: var(--ink); font-size: 1rem; }
+  .brand-mark{ width:26px; height:26px; flex:none; }
+  .navlinks{ display:flex; gap:22px; font-size:.92rem; }
+  .navlinks a{ color: var(--ink-dim); }
+  .navlinks a:hover{ color: var(--ink); text-decoration:none; }
+  @media (max-width: 720px){ .navlinks{ display:none; } }
+
+  /* ---------- HERO ---------- */
+  .hero{ padding: 108px 0 88px; border-top:none; position:relative; overflow:hidden; }
+  .hero::after{
+    content:"";
+    position:absolute; inset:auto -20% -60% -20%;
+    height: 420px;
+    background: radial-gradient(closest-side, rgba(122,162,255,.10), transparent 70%);
+    pointer-events:none;
+  }
+  .hero-grid{ display:grid; grid-template-columns: 1.1fr .9fr; gap: 48px; align-items:center; position:relative; }
+  @media (max-width: 880px){ .hero-grid{ grid-template-columns: 1fr; } }
+
+  .hero h1{
+    font-size: clamp(2.4rem, 5.2vw, 3.9rem);
+    line-height: 1.04;
+    background: linear-gradient(180deg, #fff, #c9e2d4 65%, var(--ink-dim));
+    -webkit-background-clip: text; background-clip:text; color: transparent;
+  }
+  .hero .tagline{
+    margin-top: 20px;
+    font-size: clamp(1.05rem, 1.7vw, 1.25rem);
+    color: var(--ink-dim);
+    max-width: 54ch;
+  }
+  .hero .tagline strong{ color: var(--ink); font-weight: 650; }
+
+  .cta-row{ display:flex; gap:14px; flex-wrap:wrap; margin-top: 34px; }
+  .btn{
+    display:inline-flex; align-items:center; gap:9px;
+    padding: 13px 22px; border-radius: 10px; font-weight: 650; font-size: .96rem;
+    border: 1px solid transparent; transition: transform .15s ease, border-color .15s ease, background .15s ease;
+  }
+  .btn:hover{ text-decoration:none; transform: translateY(-1px); }
+  .btn-primary{ background: var(--accent); color: #06110b; }
+  .btn-primary:hover{ background:#74eb9e; }
+  .btn-ghost{ background: transparent; color: var(--ink); border-color: var(--line); }
+  .btn-ghost:hover{ border-color: var(--accent-dim); color: var(--accent); }
+
+  .hero-badges{ display:flex; gap:10px; flex-wrap:wrap; margin-top:28px; }
+  .badge{
+    font-size:.78rem; color: var(--ink-faint); border:1px solid var(--line);
+    padding: 5px 11px; border-radius: 999px; font-family: var(--mono);
+  }
+
+  .chat-panel{
+    background: linear-gradient(160deg, var(--bg-raised), var(--bg-card));
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 22px;
+    box-shadow: 0 30px 60px -30px rgba(0,0,0,.6);
+  }
+  .chat-panel .chat-head{
+    display:flex; align-items:center; gap:8px;
+    color: var(--ink-faint); font-size:.8rem; font-family: var(--mono);
+    padding-bottom: 14px; border-bottom: 1px solid var(--line-soft); margin-bottom: 16px;
+  }
+  .chat-panel .dot-row span{ width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:5px; background:#22332c; }
+  .bubble{
+    max-width: 88%;
+    padding: 11px 15px; border-radius: 14px;
+    font-size: .92rem; line-height: 1.45; margin-bottom: 12px;
+  }
+  .bubble.user{
+    background: rgba(122,162,255,.12); border: 1px solid rgba(122,162,255,.22);
+    color: var(--ink); margin-left:auto; border-bottom-right-radius: 4px;
+  }
+  .bubble.agent{
+    background: rgba(91,224,138,.09); border: 1px solid rgba(91,224,138,.18);
+    color: var(--ink-dim); border-bottom-left-radius: 4px;
+  }
+  .bubble.agent strong{ color: var(--ink); }
+  .toolchip{
+    display:inline-block; font-family: var(--mono); font-size:.72rem;
+    color: var(--accent); border: 1px dashed rgba(91,224,138,.35);
+    border-radius: 6px; padding: 3px 9px; margin-bottom: 12px;
+  }
+
+  /* ---------- CARDS ---------- */
+  .card-grid{ display:grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+  @media (max-width: 980px){ .card-grid{ grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px){ .card-grid{ grid-template-columns: 1fr; } }
+
+  .card{
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 26px 22px;
+    transition: border-color .18s ease, transform .18s ease;
+  }
+  .card:hover{ border-color: var(--accent-dim); transform: translateY(-3px); }
+  .card-icon{
+    width: 42px; height:42px; border-radius: 11px;
+    display:flex; align-items:center; justify-content:center;
+    background: rgba(91,224,138,.1); border: 1px solid rgba(91,224,138,.22);
+    margin-bottom: 16px; font-size: 1.15rem;
+  }
+  .card h3{ font-size: 1.05rem; margin-bottom: 8px; }
+  .card p{ color: var(--ink-dim); font-size: .93rem; margin:0; }
+
+  /* ---------- DIAGRAMA ---------- */
+  .diagram-wrap{
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 28px;
+    overflow-x: auto;
+  }
+  .diagram-wrap svg{ display:block; margin: 0 auto; min-width: 680px; width:100%; height:auto; }
+
+  .legend-grid{ display:grid; grid-template-columns: repeat(4, 1fr); gap:16px; margin-top: 28px; }
+  @media (max-width: 880px){ .legend-grid{ grid-template-columns: repeat(2,1fr); } }
+  @media (max-width: 500px){ .legend-grid{ grid-template-columns: 1fr; } }
+  .legend-item{
+    border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+    background: var(--bg-raised);
+  }
+  .legend-item .dot{ width:10px; height:10px; border-radius:3px; display:inline-block; margin-right:8px; }
+  .legend-item h4{ margin:0 0 6px; font-size:.92rem; color: var(--ink); display:flex; align-items:center; }
+  .legend-item p{ margin:0; color: var(--ink-dim); font-size: .85rem; }
+
+  /* ---------- FERRAMENTAS ---------- */
+  .tools-grid{ display:grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  @media (max-width: 720px){ .tools-grid{ grid-template-columns: 1fr; } }
+  .tool-row{
+    display:flex; align-items:center; justify-content:space-between; gap: 16px;
+    background: var(--bg-card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px 18px;
+  }
+  .tool-row .say{ color: var(--ink-dim); font-size:.95rem; font-style: italic; }
+  .tool-row .say b{ color: var(--ink); font-style: normal; }
+  .tool-row code{ flex:none; }
+
+  .note-strip{
+    margin-top: 26px; padding: 16px 20px;
+    border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 10px; background: var(--bg-raised);
+    color: var(--ink-dim); font-size: .93rem;
+  }
+
+  /* ---------- VOZ ---------- */
+  .split{ display:grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  @media (max-width: 820px){ .split{ grid-template-columns: 1fr; } }
+  .panel{
+    background: var(--bg-card); border: 1px solid var(--line);
+    border-radius: 16px; padding: 26px;
+  }
+  .panel h3{ font-size: 1.12rem; margin-bottom: 12px; }
+  .panel p, .panel li{ color: var(--ink-dim); font-size: .94rem; }
+  .panel ul{ margin: 12px 0 0; padding-left: 20px; }
+  .panel li{ margin-bottom: 8px; }
+  .panel li::marker{ color: var(--accent); }
+
+  .profile-sample{
+    font-family: var(--mono); font-size: .8rem; line-height: 1.6;
+    background: #0b1512; border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 18px; margin-top: 16px;
+    color: var(--ink-dim); overflow-x:auto;
+  }
+  .profile-sample .k{ color: var(--accent-2); }
+  .profile-sample .v{ color: var(--accent); }
+
+  /* ---------- PROVEDORES ---------- */
+  .prov-grid{ display:grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  @media (max-width: 720px){ .prov-grid{ grid-template-columns: 1fr; } }
+  .prov{ background: var(--bg-card); border: 1px solid var(--line); border-radius: 16px; padding: 26px; }
+  .prov .tag{
+    display:inline-block; font-size:.72rem; font-family: var(--mono);
+    letter-spacing:.08em; text-transform: uppercase;
+    color: var(--accent); background: rgba(91,224,138,.1);
+    border: 1px solid rgba(91,224,138,.2); border-radius: 999px;
+    padding: 3px 10px; margin-bottom: 14px;
+  }
+  .prov.alt .tag{ color: var(--accent-2); background: rgba(122,162,255,.1); border-color: rgba(122,162,255,.22); }
+  .prov h3{ font-size: 1.15rem; margin-bottom: 10px; }
+  .prov p{ color: var(--ink-dim); font-size:.94rem; margin: 0 0 10px; }
+
+  /* ---------- INSTALAÇÃO ---------- */
+  .steps{ counter-reset: step; display:grid; gap: 16px; }
+  .step{
+    display:flex; gap: 18px; align-items:flex-start;
+    background: var(--bg-card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 22px;
+  }
+  .step::before{
+    counter-increment: step; content: counter(step);
+    flex:none; width: 34px; height: 34px; border-radius: 50%;
+    display:flex; align-items:center; justify-content:center;
+    background: rgba(91,224,138,.12); border: 1px solid rgba(91,224,138,.3);
+    color: var(--accent); font-weight: 750; font-size: .95rem;
+  }
+  .step h3{ font-size: 1.02rem; margin-bottom: 6px; }
+  .step p{ margin:0; color: var(--ink-dim); font-size:.93rem; }
+
+  /* ---------- FOOTER ---------- */
+  footer{ border-top: 1px solid var(--line-soft); padding: 44px 0 56px; }
+  .footer-grid{ display:flex; justify-content:space-between; align-items:center; gap: 20px; flex-wrap:wrap; }
+  .footer-note{ color: var(--ink-faint); font-size:.86rem; }
+  .footer-links{ display:flex; gap: 20px; font-size:.92rem; }
+
+  /* ---------- REVEAL ---------- */
+  .reveal{ opacity: 0; transform: translateY(14px); transition: opacity .5s ease, transform .5s ease; }
+  .reveal.in{ opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce){ .reveal{ opacity:1; transform:none; transition:none; } }
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="wrap">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+        <rect x="1" y="1" width="24" height="24" rx="7" fill="rgba(91,224,138,.12)" stroke="#5be08a" stroke-width="1.4"/>
+        <path d="M7.5 9.5h11M7.5 13h11M7.5 16.5h6.5" stroke="#5be08a" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      WhatsApp Agent
+    </div>
+    <div class="navlinks">
+      <a href="#o-que-e">O que é</a>
+      <a href="#como-funciona">Como funciona</a>
+      <a href="#ferramentas">Ferramentas</a>
+      <a href="#voz">Voz</a>
+      <a href="#seguranca">Segurança</a>
+      <a href="#instalacao">Instalação</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero wrap">
+  <div class="hero-grid">
+    <div>
+      <div class="eyebrow">WhatsApp · MCP · Supabase</div>
+      <h1>Seu WhatsApp,<br>operado por IA.</h1>
+      <p class="tagline">
+        Um backend headless que conecta o seu número ao <strong>Claude</strong> — que lê, resume,
+        transcreve áudios, categoriza contatos e <strong>responde por você</strong>, tudo em linguagem
+        natural. Os dados ficam num banco que é <strong>seu</strong>.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/Expert-Integrado/whatsapp-agent">Ver no GitHub</a>
+        <a class="btn btn-ghost" href="#instalacao">Como instalar</a>
+      </div>
+      <div class="hero-badges">
+        <span class="badge">v3 · open source</span>
+        <span class="badge">single-tenant</span>
+        <span class="badge">MCP-over-HTTP</span>
+        <span class="badge">Z-API ou Evolution</span>
+      </div>
+    </div>
+    <div class="chat-panel reveal">
+      <div class="chat-head">
+        <span class="dot-row"><span></span><span></span><span></span></span>
+        você + Claude, em qualquer harness MCP
+      </div>
+      <div class="bubble user">Do que eu tô devendo resposta?</div>
+      <div class="toolchip">tool: inbox · waiting_on:me</div>
+      <div class="bubble agent"><strong>3 conversas esperando você:</strong><br>
+        Pedro (2 dias) — orçamento do site<br>
+        Ana (1 dia) — áudio transcrito: pergunta da agenda<br>
+        Carlos (5 h) — confirmação da reunião</div>
+      <div class="bubble user">Responde pro Pedro que fecho amanhã.</div>
+      <div class="toolchip">tool: send · confirma antes de enviar</div>
+      <div class="bubble agent">Rascunho pronto no seu tom de voz. Envio?</div>
+    </div>
+  </div>
+</section>
+
+<section id="o-que-e" class="wrap">
+  <div class="section-head reveal">
+    <div class="eyebrow">01 · O que é</div>
+    <h2>Não é um chatbot. É o seu WhatsApp com um operador.</h2>
+    <p class="section-sub">
+      O WhatsApp Agent não atende os seus clientes com respostas prontas — ele coloca o Claude
+      pra trabalhar <em>pra você</em>, sobre as suas conversas reais, do seu jeito.
+    </p>
+  </div>
+  <div class="card-grid reveal">
+    <div class="card">
+      <div class="card-icon">📥</div>
+      <h3>Captura tudo</h3>
+      <p>Texto, áudio, imagem, vídeo e documento — cada mensagem que entra ou sai vira registro
+      em Postgres e mídia em Storage, no seu projeto Supabase.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🎙️</div>
+      <h3>Transcreve sozinho</h3>
+      <p>Um cron roda a cada 2 minutos e transcreve os áudios com Whisper. Quando você pergunta
+      "o que a Ana falou?", a resposta já vem em texto.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧠</div>
+      <h3>Você conversa, ele opera</h3>
+      <p>"Do que eu tô devendo resposta?", "resume a conversa com o Pedro", "responde que fecho
+      amanhã" — linguagem natural, sem comando decorado.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔒</div>
+      <h3>O banco é seu</h3>
+      <p>Single-tenant por design: cada instalação roda no Supabase de quem instala. Nenhuma
+      mensagem passa por servidor de terceiros do projeto.</p>
+    </div>
+  </div>
+</section>
+
+<section id="como-funciona" class="wrap">
+  <div class="section-head reveal">
+    <div class="eyebrow">02 · Como funciona</div>
+    <h2>Da mensagem ao Claude, em linha reta</h2>
+    <p class="section-sub">
+      Três serviços e nenhum processo local: o provedor recebe a mensagem, o Supabase guarda e
+      executa, e o Claude conversa com tudo isso por MCP.
+    </p>
+  </div>
+
+  <div class="diagram-wrap reveal">
+    <svg viewBox="0 0 880 300" role="img" aria-label="Diagrama: provedor WhatsApp envia webhook para process-webhook, que grava no Supabase; pg_cron transcreve áudios; mcp-api expõe as tools para o Claude; envios voltam pelo provedor.">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="#5be08a"/>
+        </marker>
+        <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="#7aa2ff"/>
+        </marker>
+      </defs>
+
+      <!-- Provedor -->
+      <rect x="20" y="110" width="150" height="80" rx="12" fill="rgba(91,224,138,.07)" stroke="#3aa663"/>
+      <text x="95" y="145" text-anchor="middle" fill="#e9f0ed" font-size="14" font-weight="700">Provedor</text>
+      <text x="95" y="166" text-anchor="middle" fill="#a5b5ae" font-size="11">Z-API ou Evolution</text>
+
+      <!-- process-webhook -->
+      <rect x="230" y="40" width="170" height="64" rx="12" fill="rgba(91,224,138,.07)" stroke="#3aa663"/>
+      <text x="315" y="67" text-anchor="middle" fill="#e9f0ed" font-size="13" font-weight="700">process-webhook</text>
+      <text x="315" y="86" text-anchor="middle" fill="#a5b5ae" font-size="11">Edge Function · 24/7</text>
+
+      <!-- Supabase -->
+      <rect x="250" y="150" width="180" height="110" rx="14" fill="rgba(122,162,255,.06)" stroke="#4f6bc4"/>
+      <text x="340" y="180" text-anchor="middle" fill="#e9f0ed" font-size="14" font-weight="700">Supabase</text>
+      <text x="340" y="201" text-anchor="middle" fill="#a5b5ae" font-size="11">Postgres · Storage</text>
+      <text x="340" y="219" text-anchor="middle" fill="#a5b5ae" font-size="11">pg_cron: Whisper 2 min</text>
+      <text x="340" y="237" text-anchor="middle" fill="#a5b5ae" font-size="11">Edge Functions (Deno)</text>
+
+      <!-- mcp-api -->
+      <rect x="500" y="150" width="160" height="80" rx="12" fill="rgba(91,224,138,.07)" stroke="#3aa663"/>
+      <text x="580" y="183" text-anchor="middle" fill="#e9f0ed" font-size="14" font-weight="700">mcp-api</text>
+      <text x="580" y="204" text-anchor="middle" fill="#a5b5ae" font-size="11">MCP-over-HTTP · 22 tools</text>
+
+      <!-- Claude -->
+      <rect x="720" y="150" width="140" height="80" rx="12" fill="rgba(122,162,255,.07)" stroke="#4f6bc4"/>
+      <text x="790" y="183" text-anchor="middle" fill="#e9f0ed" font-size="14" font-weight="700">Claude</text>
+      <text x="790" y="204" text-anchor="middle" fill="#a5b5ae" font-size="11">Code · Desktop · Web</text>
+
+      <!-- setas -->
+      <path d="M170 135 L 245 90" stroke="#5be08a" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+      <text x="188" y="98" fill="#6d7f77" font-size="10.5" font-family="monospace">webhook</text>
+
+      <path d="M330 104 L 338 144" stroke="#5be08a" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+      <text x="352" y="128" fill="#6d7f77" font-size="10.5" font-family="monospace">grava msg + mídia</text>
+
+      <path d="M430 195 L 494 195" stroke="#7aa2ff" stroke-width="1.6" fill="none" marker-end="url(#arr2)" marker-start="url(#arr2)"/>
+
+      <path d="M660 190 L 714 190" stroke="#7aa2ff" stroke-width="1.6" fill="none" marker-end="url(#arr2)" marker-start="url(#arr2)"/>
+      <text x="687" y="178" text-anchor="middle" fill="#6d7f77" font-size="10.5" font-family="monospace">key/OAuth</text>
+
+      <path d="M560 240 C 480 295, 220 290, 110 196" stroke="#5be08a" stroke-width="1.6" fill="none" stroke-dasharray="5 5" marker-end="url(#arr)"/>
+      <text x="350" y="288" text-anchor="middle" fill="#6d7f77" font-size="10.5" font-family="monospace">send · react · edit</text>
+    </svg>
+  </div>
+
+  <div class="legend-grid reveal">
+    <div class="legend-item">
+      <h4><span class="dot" style="background:#5be08a"></span>Provedor WhatsApp</h4>
+      <p>O gateway do seu número: Z-API (hospedado) ou Evolution API (self-hosted), escolhido por
+      instância. Recebe as mensagens e despacha os envios.</p>
+    </div>
+    <div class="legend-item">
+      <h4><span class="dot" style="background:#7aa2ff"></span>Supabase = runtime</h4>
+      <p>Postgres, Storage com 6 buckets de mídia, Edge Functions e pg_cron. Não existe servidor
+      seu pra manter: o projeto Supabase é o backend inteiro.</p>
+    </div>
+    <div class="legend-item">
+      <h4><span class="dot" style="background:#5be08a"></span>mcp-api</h4>
+      <p>Uma Edge Function que é um servidor MCP falando HTTP. São 22 ferramentas — inbox, read,
+      send, search e companhia — que qualquer harness MCP consome.</p>
+    </div>
+    <div class="legend-item">
+      <h4><span class="dot" style="background:#e9f0ed"></span>Claude (ou outro)</h4>
+      <p>Claude Code conecta por header key; Desktop e Web por OAuth (a própria mcp-api é o
+      Authorization Server). Funciona em qualquer app com suporte a MCP.</p>
+    </div>
+  </div>
+</section>
+
+<section id="ferramentas" class="wrap">
+  <div class="section-head reveal">
+    <div class="eyebrow">03 · Ferramentas</div>
+    <h2>Você diz. Ele aciona a tool certa.</h2>
+    <p class="section-sub">
+      Nada de comando decorado: são ferramentas MCP que o Claude escolhe sozinho a partir do que
+      você pede, em português.
+    </p>
+  </div>
+  <div class="tools-grid reveal">
+    <div class="tool-row"><span class="say">"<b>Do que eu tô devendo resposta?</b>"</span><code>inbox</code></div>
+    <div class="tool-row"><span class="say">"<b>Resume a conversa com o Pedro</b>" (áudios já transcritos)</span><code>read</code></div>
+    <div class="tool-row"><span class="say">"<b>Responde que fecho amanhã</b>" (confirma antes)</span><code>send</code></div>
+    <div class="tool-row"><span class="say">"<b>Procura onde falaram de orçamento</b>"</span><code>search</code></div>
+    <div class="tool-row"><span class="say">"<b>Categoriza esse chat como cliente</b>"</span><code>categorize_chat</code></div>
+    <div class="tool-row"><span class="say">"<b>Reage com 👍 na última do Pedro</b>"</span><code>react</code></div>
+    <div class="tool-row"><span class="say">"<b>Manda um áudio pra Ana</b>" (texto vira voz)</span><code>send_voice</code></div>
+    <div class="tool-row"><span class="say">"<b>Essa mensagem tá no meu tom?</b>"</span><code>check_message</code></div>
+  </div>
+  <div class="note-strip reveal">
+    E mais: transcrição sob demanda, download de anexos, edição e apagamento de mensagens,
+    anotações por contato, sincronização de grupos, merge de chats duplicados… <strong>22 tools</strong>
+    no total — a lista completa está no <a href="https://github.com/Expert-Integrado/whatsapp-agent#manual-de-uso">README</a>.
+  </div>
+</section>
+
+<section id="voz" class="wrap">
+  <div class="section-head reveal">
+    <div class="eyebrow">04 · Voz</div>
+    <h2>Escrever por você sem parecer um robô</h2>
+    <p class="section-sub">
+      A parte mais difícil de responder em nome de alguém não é o conteúdo — é o tom. O agente
+      resolve isso em duas camadas.
+    </p>
+  </div>
+  <div class="split reveal">
+    <div class="panel">
+      <h3>Voice guide global</h3>
+      <p>
+        Um guia do <em>seu</em> jeito de escrever, instalado via <code>setup_voice_guide</code>:
+        saudações que você nunca usa, gírias que usa demais, como você pontua, o que é
+        proibido. Antes de fixar um rascunho, o agente roda <code>check_message</code> — que
+        devolve um score e aponta o que soou artificial.
+      </p>
+      <ul>
+        <li>O guia mora no seu banco, versionável no seu repositório.</li>
+        <li>O check pega "fingerprints de IA": hype, afirmação lisa, formalidade que não é sua.</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>Perfil de voz por contato</h3>
+      <p>
+        Cada relação tem um tom. O <code>voice_profile</code> guarda, por chat, como a pessoa te
+        chama, como <em>você</em> a chama, as gírias dela e o registro da relação — e o agente
+        espelha isso ao redigir, por cima do guide global.
+      </p>
+      <div class="profile-sample">{<br>
+        &nbsp;&nbsp;<span class="k">"como_me_chama"</span>: [<span class="v">"mano"</span>, <span class="v">"irmão"</span>],<br>
+        &nbsp;&nbsp;<span class="k">"como_chamo"</span>: [<span class="v">"Jão"</span>],<br>
+        &nbsp;&nbsp;<span class="k">"girias"</span>: [<span class="v">"dale"</span>, <span class="v">"top demais"</span>],<br>
+        &nbsp;&nbsp;<span class="k">"registro"</span>: <span class="v">"informal-íntimo, zoa, áudio longo"</span>,<br>
+        &nbsp;&nbsp;<span class="k">"confianca"</span>: <span class="v">"alta"</span><br>
+      }</div>
+      <ul>
+        <li>Nasce de um <strong>backfill do histórico</strong> (skill no repo, com piloto revisável).</li>
+        <li>Se mantém sozinho: captura incremental no uso + rotina semanal local de nutrição.</li>
+        <li>Só evidência literal vira perfil — na dúvida, o contato fica sem perfil e o guide manda.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="provedores" class="wrap">
+  <div class="section-head reveal">
+    <div class="eyebrow">05 · Provedores</div>
+    <h2>Z-API ou Evolution — você escolhe por instância</h2>
+    <p class="section-sub">
+      Desde a v3, o gateway do WhatsApp é plugável. Os dois convivem no mesmo banco, e instâncias
+      antigas continuam funcionando sem reconfiguração.
+    </p>
+  </div>
+  <div class="prov-grid reveal">
+    <div class="prov">
+      <span class="tag">padrão recomendado</span>
+      <h3>Z-API</h3>
+      <p>Hospedado (SaaS): você cria a conta, conecta o número por QR code e pronto — sem infra
+      pra manter. Plano pago.</p>
+      <p><code>instance_id</code> + <code>auth_token</code> + <code>client_token</code></p>
+    </div>
+    <div class="prov alt">
+      <span class="tag">self-hosted</span>
+      <h3>Evolution API</h3>
+      <p>Open source e gratuito: você sobe o seu próprio servidor Evolution e aponta o agente pra
+      ele. Pra quem já tem (ou quer) a própria infra.</p>
+      <p><code>base_url</code> do servidor + <code>auth_token</code></p>
+    </div>
+  </div>
+</section>
+
+<section id="seguranca" class="wrap">
+  <div class="section-head reveal">
+    <div class="eyebrow">06 · Segurança</div>
+    <h2>Single-tenant: o dado não sai do seu controle</h2>
+    <p class="section-sub">
+      Não existe "nuvem do projeto". Cada instalação é o seu número, no seu provedor, gravando no
+      seu Supabase.
+    </p>
+  </div>
+  <div class="card-grid reveal" style="grid-template-columns: repeat(3, 1fr);">
+    <div class="card">
+      <div class="card-icon">🗝️</div>
+      <h3>Segredos só server-side</h3>
+      <p>A secret key do Supabase (que bypassa RLS) e as credenciais do provedor vivem nos
+      secrets das Edge Functions — nunca no repositório, nunca no cliente.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🚪</div>
+      <h3>Acesso com chave</h3>
+      <p>O MCP é protegido por <code>MCP_API_KEY</code> (header <code>x-mcp-key</code>) no Claude
+      Code, ou OAuth com PKCE no Desktop/Web — a própria mcp-api é o Authorization Server.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧾</div>
+      <h3>Auditável de ponta a ponta</h3>
+      <p>Migrations versionadas, mensagens do agente marcadas (<code>sent_by_agent</code>) e todo
+      envio confirmável antes de sair. O histórico é seu pra auditar.</p>
+    </div>
+  </div>
+</section>
+
+<section id="instalacao" class="wrap">
+  <div class="section-head reveal">
+    <div class="eyebrow">07 · Instalação</div>
+    <h2>O Claude instala pra você</h2>
+    <p class="section-sub">
+      Dois planos bem separados: um setup que você roda uma vez, e a operação do dia a dia — que
+      não precisa nem do repositório.
+    </p>
+  </div>
+  <div class="steps reveal">
+    <div class="step">
+      <div>
+        <h3>Crie as três contas</h3>
+        <p>Supabase (banco + functions), um provedor de WhatsApp (Z-API ou Evolution) e OpenAI
+        (Whisper pra transcrição). Os planos gratuitos dão pra começar.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div>
+        <h3>Clone o repo e rode a skill <code>/setup</code></h3>
+        <p>Abra a pasta no Claude Code (aba Code do Claude Desktop) e peça o setup: o Claude
+        instala o Supabase CLI se faltar, pede uma credencial de cada vez (só no
+        <code>.env</code> local, gitignored), aplica as migrations, configura os secrets e
+        deploya as Edge Functions.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div>
+        <h3>Conecte o MCP e opere</h3>
+        <p>Aponte o seu harness pra <code>https://SEU_PROJECT_REF.supabase.co/functions/v1/mcp-api</code>
+        — uma vez. Daí em diante é conversa: inbox, resumos, respostas no seu tom. Recomendado:
+        rode o backfill do perfil de voz e deixe a rotina semanal de nutrição agendada.</p>
+      </div>
+    </div>
+  </div>
+  <div class="note-strip reveal">
+    Passo a passo completo, com o prompt pronto do setup, no
+    <a href="https://github.com/Expert-Integrado/whatsapp-agent#instalação">README do repositório</a>.
+  </div>
+</section>
+
+<footer>
+  <div class="wrap footer-grid">
+    <div>
+      <div class="brand" style="margin-bottom:6px;">WhatsApp Agent</div>
+      <div class="footer-note">Open source, parte da mentoria Expert Integrado. Feito com Supabase + MCP.</div>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/Expert-Integrado/whatsapp-agent">Repositório</a>
+      <a href="https://github.com/Expert-Integrado/whatsapp-agent#readme">README</a>
+      <a href="https://expert-integrado.github.io/expert-brain/">Expert Brain</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  (function(){
+    var els = document.querySelectorAll('.reveal');
+    if (!('IntersectionObserver' in window)) {
+      els.forEach(function(el){ el.classList.add('in'); });
+      return;
+    }
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(entry){
+        if (entry.isIntersecting){
+          entry.target.classList.add('in');
+          io.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.12 });
+    els.forEach(function(el){ io.observe(el); });
+  })();
+</script>
+</body>
+</html>
