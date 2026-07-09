@@ -4,7 +4,13 @@
 <title>WhatsApp Agent — como funciona</title>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Como o WhatsApp Agent funciona: um backend headless que conecta o seu número de WhatsApp ao Claude via MCP — captura tudo, transcreve áudios e responde por você, no seu Supabase.">
+<meta name="description" content="Como o WhatsApp Agent funciona: um backend headless que conecta o seu número de WhatsApp ao Claude via MCP — captura tudo, transcreve áudios e responde por você, no seu Supabase. Um produto Expert Integrado.">
+<meta property="og:title" content="WhatsApp Agent — como funciona">
+<meta property="og:description" content="Seu WhatsApp, operado por IA. Open source, single-tenant, no seu Supabase. Um produto Expert Integrado.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://expert-integrado.github.io/whatsapp-agent/">
+<meta property="og:image" content="https://expert-integrado.github.io/whatsapp-agent/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%AC%3C/text%3E%3C/svg%3E">
 
 <style>
@@ -88,6 +94,14 @@
   .topnav .wrap{ display:flex; align-items:center; justify-content:space-between; height: 60px; }
   .brand{ display:flex; align-items:center; gap:10px; font-weight:800; color: var(--ink); font-size: 1rem; }
   .brand-mark{ width:26px; height:26px; flex:none; }
+  .by-ei{
+    font-weight: 550; font-size: .78rem; letter-spacing: .02em;
+    color: var(--ink-faint);
+    border-left: 1px solid var(--line); padding-left: 12px; margin-left: 4px;
+    white-space: nowrap;
+  }
+  .by-ei a{ color: var(--ink-dim); }
+  .by-ei a:hover{ color: var(--accent); text-decoration: none; }
   .navlinks{ display:flex; gap:22px; font-size:.92rem; }
   .navlinks a{ color: var(--ink-dim); }
   .navlinks a:hover{ color: var(--ink); text-decoration:none; }
@@ -308,6 +322,7 @@
         <path d="M7.5 9.5h11M7.5 13h11M7.5 16.5h6.5" stroke="#5be08a" stroke-width="1.6" stroke-linecap="round"/>
       </svg>
       WhatsApp Agent
+      <span class="by-ei">por <a href="https://expertintegrado.com.br">Expert Integrado</a></span>
     </div>
     <div class="navlinks">
       <a href="#o-que-e">O que é</a>
@@ -335,6 +350,7 @@
         <a class="btn btn-ghost" href="#instalacao">Como instalar</a>
       </div>
       <div class="hero-badges">
+        <span class="badge" style="color:var(--accent); border-color:rgba(91,224,138,.4);">um produto Expert Integrado</span>
         <span class="badge">v3 · open source</span>
         <span class="badge">single-tenant</span>
         <span class="badge">MCP-over-HTTP</span>
@@ -659,10 +675,11 @@
 <footer>
   <div class="wrap footer-grid">
     <div>
-      <div class="brand" style="margin-bottom:6px;">WhatsApp Agent</div>
-      <div class="footer-note">Open source, parte da mentoria Expert Integrado. Feito com Supabase + MCP.</div>
+      <div class="brand" style="margin-bottom:6px;">WhatsApp Agent <span class="by-ei">por <a href="https://expertintegrado.com.br">Expert Integrado</a></span></div>
+      <div class="footer-note">Um produto <strong>Expert Integrado</strong> — open source, parte da mentoria. Feito com Supabase + MCP.</div>
     </div>
     <div class="footer-links">
+      <a href="https://expertintegrado.com.br">Expert Integrado</a>
       <a href="https://github.com/Expert-Integrado/whatsapp-agent">Repositório</a>
       <a href="https://github.com/Expert-Integrado/whatsapp-agent#readme">README</a>
       <a href="https://expert-integrado.github.io/expert-brain/">Expert Brain</a>

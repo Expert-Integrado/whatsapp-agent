@@ -80,6 +80,13 @@ Conectado, você opera o WhatsApp **conversando com o Claude em linguagem natura
 
 Como são **ferramentas MCP** (não skills), funcionam igual em qualquer app de IA com suporte a MCP.
 
+### Perfil de voz por contato (recomendado)
+
+O agente escreve melhor em seu nome quando sabe **como cada pessoa te chama e como você chama cada uma** (mano? doutor? pelo nome?). Isso mora em `chats.voice_profile`, que as tools `read`/`send` já usam pra espelhar o tom ao redigir. Dois passos:
+
+1. **Backfill (uma vez):** abra a pasta do repo no Claude Code e peça *"roda o backfill de voice profile"* — a skill [`voice-profile-backfill`](skills/voice-profile-backfill/SKILL.md) varre o seu histórico, monta um piloto pra você revisar e depois processa o resto.
+2. **Nutrição (rotina semanal local):** uma vez por semana, com o computador ligado, peça *"roda a nutrição de voice profile"*. O modo `--nutricao` pega só o delta da semana (contatos novos + perfis com mensagens novas) — leva minutos. Como os dados moram no **seu Supabase**, qualquer máquina serve; não precisa de servidor ligado 24/7. Se a semana pular, rode com `--days 14` que o delta cobre o acumulado.
+
 ---
 
 ## Provedores de WhatsApp (Z-API vs Evolution API)

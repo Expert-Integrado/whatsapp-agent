@@ -3,7 +3,15 @@
 //
 //   node scripts/voice-profile-backfill.mjs corpus --instance pessoal [--limit 50]
 //        [--min-messages 5] [--before <ISO>] [--force] [--out <dir>]
+//   node scripts/voice-profile-backfill.mjs corpus --instance pessoal --nutricao [--days 7] [--out <dir>]
 //   node scripts/voice-profile-backfill.mjs commit --file perfis.json [--force]
+//
+// --nutricao (rotina semanal pós-backfill): em vez da fila completa, pega só o delta —
+//   (a) NOVOS: sem voice_profile e com atividade nos últimos --days;
+//   (b) DEFASADOS: perfil analisado ANTES da janela e atividade DENTRO dela (ou seja,
+//       mensagens novas desde a análise). fonte:'manual' nunca entra. Os defasados
+//       levam current_profile no corpus pro analista ATUALIZAR (preservar vocativos
+//       consolidados, somar os novos) em vez de recomeçar do zero.
 //
 // Varredura completa (missão "de fora a fora"): rodadas com --before <cursor>.
 // Cada rodada processa OS PRÓXIMOS N chats por recência (inclusive os que acabam
@@ -152,7 +160,14 @@ async function resolveInstance() {
     console.error('corpus exige --instance <alias|instance_id> (rodar só na instância certa é de propósito).');
     process.exit(1);
   }
-  const rows = await sb('wa_instance?select=instance_id,alias,is_default');
+  // 0040 renomeou zapi_instance -> wa_instance; banco ainda não migrado tem só o nome
+  // antigo. Tentar o novo e cair pro legado mantém o script válido nos dois estados.
+  let rows;
+  try {
+    rows = await sb('wa_instance?select=instance_id,alias,is_default');
+  } catch {
+    rows = await sb('zapi_instance?select=instance_id,alias,is_default');
+  }
   const inst = rows.find((r) => r.alias === key || r.instance_id === key);
   if (!inst) {
     console.error(`Instância "${key}" não encontrada. Disponíveis: ${rows.map((r) => r.alias || r.instance_id).join(', ')}`);
@@ -171,15 +186,38 @@ async function corpus() {
   // Chats fantasma @lid ficam de fora como ALVO (entram como fonte via lid_mapping).
   // --before <ISO> pagina a varredura: processa os PRÓXIMOS N por recência e reporta
   // o cursor da rodada seguinte — quem for pulado não trava a fila.
+  const nutricao = hasFlag('--nutricao');
+  const days = parseInt(argOf('--days') || '7', 10);
   const before = argOf('--before');
-  const vpFilter = hasFlag('--force') ? '' : '&voice_profile=is.null';
-  const beforeFilter = before ? `&last_message_at=lt.${encodeURIComponent(before)}` : '';
-  const targetsRaw = await sb(
-    `chats?select=instance_id,chat_id,chat_name,phone,last_message_at` +
+  const baseSelect =
+    `chats?select=instance_id,chat_id,chat_name,phone,last_message_at,voice_profile` +
     `&instance_id=eq.${encodeURIComponent(INST)}` +
-    `&is_group=eq.false&is_announcement=eq.false&is_community=eq.false${vpFilter}${beforeFilter}` +
-    `&order=last_message_at.desc.nullslast&limit=${CONTACT_CAP}`
-  );
+    `&is_group=eq.false&is_announcement=eq.false&is_community=eq.false`;
+  let targetsRaw, novosCount = 0, defasadosCount = 0;
+  if (nutricao) {
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const janela = `&last_message_at=gte.${encodeURIComponent(since)}` +
+      `&order=last_message_at.desc&limit=${CONTACT_CAP}`;
+    const novos = await sb(`${baseSelect}&voice_profile=is.null${janela}`);
+    // Defasado = analisado ANTES da janela + atividade DENTRO dela => há msgs novas
+    // desde a análise. Comparação lexicográfica de ISO no ->> funciona de propósito.
+    const defasados = await sb(
+      `${baseSelect}&voice_profile=not.is.null&voice_profile->>fonte=neq.manual` +
+      `&voice_profile->>analisado_em=lt.${encodeURIComponent(since)}${janela}`
+    );
+    novosCount = novos.length; defasadosCount = defasados.length;
+    targetsRaw = [...novos, ...defasados];
+    if (novos.length === CONTACT_CAP || defasados.length === CONTACT_CAP) {
+      console.error(`nutricao: janela bateu no cap de ${CONTACT_CAP} — rodar de novo pra pegar o resto.`);
+    }
+  } else {
+    const vpFilter = hasFlag('--force') ? '' : '&voice_profile=is.null';
+    const beforeFilter = before ? `&last_message_at=lt.${encodeURIComponent(before)}` : '';
+    targetsRaw = await sb(
+      `${baseSelect}${vpFilter}${beforeFilter}` +
+      `&order=last_message_at.desc.nullslast&limit=${CONTACT_CAP}`
+    );
+  }
   const exhausted = targetsRaw.length < CONTACT_CAP;
   const tsSeen = targetsRaw.map((c) => c.last_message_at).filter(Boolean).sort();
   const nextBefore = tsSeen[0] ?? null; // null = só sobrou chat sem last_message_at (fim da fila)
@@ -321,6 +359,8 @@ async function corpus() {
       chat_name: t.chat_name,
       phone_variants: t.variants,
       folded_chat_ids: t.folded_chat_ids,
+      // Nutrição: perfil existente vai junto pro analista ATUALIZAR (não recomeçar).
+      ...(t.voice_profile ? { current_profile: t.voice_profile } : {}),
       dm_thin: dmThin,
       dm_msgs: dmMsgs,
       vocative_hits: vocativeHits,
@@ -348,8 +388,10 @@ async function corpus() {
   console.error(
     `corpus: ${contacts.length} contato(s) em ${files.length} batch(es) → ${outDir}\n` +
     `pulados: ${skippedFewMsgs} sem evidência (DM fraca e sem resgate por grupo), ${skippedNonNumeric} chat_id não-numérico, ${erroredContacts} com erro (catch-up no fim).\n` +
-    `CURSOR: next_before=${nextBefore ?? 'FIM'} exhausted=${exhausted}` +
-    (exhausted ? ' — fila varrida até o fim.' : ' — próxima rodada: --before nesse valor.')
+    (nutricao
+      ? `NUTRICAO: ${novosCount} novo(s) + ${defasadosCount} defasado(s) na janela de ${days} dia(s).`
+      : `CURSOR: next_before=${nextBefore ?? 'FIM'} exhausted=${exhausted}` +
+        (exhausted ? ' — fila varrida até o fim.' : ' — próxima rodada: --before nesse valor.'))
   );
 }
 
