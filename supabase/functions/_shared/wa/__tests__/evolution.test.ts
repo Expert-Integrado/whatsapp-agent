@@ -577,14 +577,44 @@ Deno.test("evo.buildAction chats → GET group/fetchAllGroups", () => {
   assertEquals(r!.method, "GET");
 });
 
-Deno.test("evo.buildAction get-contact-info → null (sem equivalente)", () => {
+Deno.test("evo.buildAction get-contact-info → POST chat/fetchProfile", () => {
   const r = e.buildAction(creds, "get-contact-info", { phone: "5511" });
-  assertEquals(r, null);
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/chat/fetchProfile/you_casa"), true);
+  assertEquals(r!.method, "POST");
+  assertEquals(JSON.parse(r!.body!), { number: "5511" });
 });
 
-Deno.test("evo.buildAction send-poll → null (sem equivalente)", () => {
-  const r = e.buildAction(creds, "send-poll", { phone: "5511" });
-  assertEquals(r, null);
+Deno.test("evo.buildAction send-poll traduz shape Z-API → message/sendPoll", () => {
+  const r = e.buildAction(creds, "send-poll", {
+    phone: "5511",
+    message: "Qual horário?",
+    poll: [{ name: "10h" }, { name: "14h" }],
+    pollMaxOptions: 1,
+  });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/message/sendPoll/you_casa"), true);
+  assertEquals(r!.method, "POST");
+  assertEquals(JSON.parse(r!.body!), {
+    number: "5511",
+    name: "Qual horário?",
+    selectableCount: 1,
+    values: ["10h", "14h"],
+  });
+});
+
+Deno.test("evo.buildAction send-poll aceita values como strings", () => {
+  const r = e.buildAction(creds, "send-poll", { phone: "5511", message: "P?", poll: ["A", "B"] });
+  assertEquals(JSON.parse(r!.body!).values, ["A", "B"]);
+  assertEquals(JSON.parse(r!.body!).selectableCount, 1);
+});
+
+Deno.test("evo.buildAction contacts → POST chat/findContacts", () => {
+  const r = e.buildAction(creds, "contacts", {});
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/chat/findContacts/you_casa"), true);
+  assertEquals(r!.method, "POST");
+  assertEquals(JSON.parse(r!.body!), { where: {} });
 });
 
 Deno.test("evo.buildAction forward → null (sem equivalente)", () => {

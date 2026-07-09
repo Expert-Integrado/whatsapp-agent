@@ -407,9 +407,45 @@ export class EvolutionProvider implements WaProvider {
           headers,
         };
 
-      // No clean Evolution mapping
+      case "send-poll": {
+        // Traduz shape Z-API {phone, message, poll:[{name}], pollMaxOptions}
+        // → Evolution {number, name, values:[string], selectableCount}
+        const values = Array.isArray(params.poll)
+          ? params.poll.map((o: any) => (typeof o === "string" ? o : o?.name)).filter(Boolean)
+          : (params.values ?? []);
+        return {
+          url: this.u(creds, "message/sendPoll"),
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            number: params.phone ?? params.number,
+            name: params.message ?? params.name,
+            selectableCount: params.pollMaxOptions ?? params.selectableCount ?? 1,
+            values,
+            ...(params.delayMessage
+              ? { delay: Math.min(15000, Math.max(0, Math.floor(params.delayMessage * 1000))) }
+              : {}),
+          }),
+        };
+      }
+
       case "get-contact-info":
-      case "send-poll":
+        return {
+          url: this.u(creds, "chat/fetchProfile"),
+          method: "POST",
+          headers,
+          body: JSON.stringify({ number: params.phone }),
+        };
+
+      case "contacts":
+        return {
+          url: this.u(creds, "chat/findContacts"),
+          method: "POST",
+          headers,
+          body: JSON.stringify({ where: {} }),
+        };
+
+      // Evolution v2 não tem endpoint de forward (confirmado na collection v2.3)
       case "forward":
       default:
         return null;

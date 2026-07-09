@@ -391,7 +391,7 @@ export class ZapiProvider implements WaProvider {
     }
 
     // Read-only Z-API endpoints are GET with no body (POST returns 405)
-    const GET_ACTIONS = new Set<WaAction>(["status", "chats"]);
+    const GET_ACTIONS = new Set<WaAction>(["status", "chats", "contacts"]);
     if (GET_ACTIONS.has(action)) {
       return { url: `${base}/${action}`, method: "GET", headers };
     }
