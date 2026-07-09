@@ -1,22 +1,23 @@
 ---
 name: nutrir-contatos
-description: Rotina diária de nutrição do vault de contatos (expert-contacts) a partir das conversas do WhatsApp. Lê as mensagens novas do dia (digest incremental), extrai fatos ditos pelas pessoas ("mudei de casa", "estou com dificuldade em X") e interações reais, registra na timeline de quem JÁ é contato e mescla contexto durável na visão geral do perfil. Contato novo no vault dispara varredura do histórico completo dele (backfill), e o passado dos contatos existentes é varrido em lotes diários. TRIGGER quando o dono pedir "nutre os contatos", "roda a nutrição", ou no agendamento diário (fim do dia). NÃO dispara pra ler/responder uma conversa específica, nem pra importar contatos novos (a nutrição nunca cria contato).
+description: Rotina diária de nutrição do vault de contatos (expert-contacts) a partir das conversas do WhatsApp E do Instagram. Lê as mensagens novas do dia (digest incremental dos dois canais), extrai fatos ditos pelas pessoas ("mudei de casa", "estou com dificuldade em X") e interações reais, registra na timeline de quem JÁ é contato e mescla contexto durável na visão geral do perfil. Contato novo no vault dispara varredura do histórico completo dele (backfill), e o passado dos contatos existentes é varrido em lotes diários. TRIGGER quando o dono pedir "nutre os contatos", "roda a nutrição", ou no agendamento diário (fim do dia). NÃO dispara pra ler/responder uma conversa específica, nem pra importar contatos novos (a nutrição nunca cria contato).
 ---
 
-# Nutrir contatos a partir das conversas do WhatsApp
+# Nutrir contatos a partir das conversas (WhatsApp + Instagram)
 
 Transforma conversa em memória de relacionamento: o que as pessoas contam no WhatsApp
-(grupos e privado) vira evento na timeline do contato no vault (expert-contacts), e fato
-relevante vira observação que alimenta a busca semântica ("quem está com dificuldade de
-contratar?").
+(grupos e privado) e nas DMs do Instagram vira evento na timeline do contato no vault
+(expert-contacts), e fato relevante vira observação que alimenta a busca semântica
+("quem está com dificuldade de contratar?").
 
 ## SEMPRE
 
 - Registrar SÓ em quem JÁ existe no vault (política conservadora, a mesma da sync de
   grupos). Remetente sem contato correspondente é pulado em silêncio.
 - Fato registrado EXPLÍCITO na mensagem. Na dúvida, pula.
-- Incremental: o digest usa cursor por chat (tabela `nurture_state`) — mensagem nunca
-  é reprocessada. O cursor só avança DEPOIS dos eventos registrados (commit separado).
+- Incremental: o digest usa cursor por chat (`nurture_state` no WhatsApp,
+  `ig_nurture_state` no Instagram) — mensagem nunca é reprocessada. O cursor só avança
+  DEPOIS dos eventos registrados (commit separado).
 - Máximo 3 observações por pessoa por rodada. Qualidade > cobertura.
 
 ## NUNCA
@@ -34,21 +35,27 @@ contratar?").
 ## Pré-requisitos
 
 - MCP `expert-contacts` conectado na sessão (tools `get_contact_by_phone`, `log_event`,
-  `get_entity`, `list_entities`, `save_person`).
+  `get_entity`, `list_entities`, `save_person`, `recall`).
 - `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` no ambiente ou em `mcp/.env` deste repo.
+- Instagram (opcional): repo `C:/repos/instagram-agent` presente na máquina — sem ele,
+  a rodada cobre só o WhatsApp e o relatório avisa.
 
-## Passo 1 — Gerar o digest
+## Passo 1 — Gerar os digests
 
 ```bash
 node scripts/nurture-digest.mjs digest --out /tmp/nurture-digest.json
+node C:/repos/instagram-agent/scripts/nurture-digest.mjs digest --out /tmp/ig-nurture-digest.json
 ```
 
-Lê as mensagens novas por chat (default: últimas 24h no primeiro run; depois, do cursor
-em diante). Read-only. O JSON traz, por chat: `instance_id`, `chat_id`, `name`,
-`is_group`, `phone`, `since`, `truncated` e as mensagens (`ts`, `from_me`, `sender_phone`,
-`sender_name`, `text`, `reply_to`).
+Cada um lê as mensagens novas por chat (default: últimas 24h no primeiro run; depois,
+do cursor em diante). Read-only. O JSON do WhatsApp traz, por chat: `instance_id`,
+`chat_id`, `name`, `is_group`, `phone`, `since`, `truncated` e as mensagens (`ts`,
+`from_me`, `sender_phone`, `sender_name`, `text`, `reply_to`). O do Instagram traz,
+por DM: `ig_user_id`, `igsid`, `username`, `name`, `since`, `truncated` e mensagens
+(`ts`, `from_me`, `type`, `by_agent`, `text`) — só entram DMs onde a PESSOA escreveu
+algo novo (outbound de campanha fica de fora por construção).
 
-Se `chats` vier vazio: reportar "nada novo" e encerrar (sem commit).
+Se os dois vierem vazios: reportar "nada novo" e encerrar (sem commit).
 
 ## Passo 2 — Resolver quem é quem
 
@@ -58,10 +65,14 @@ Pra cada chat do digest:
   `get_contact_by_phone`. Sem match → pular o chat inteiro.
 - **Grupo** (`is_group: true`): resolver cada `sender_phone` distinto das mensagens
   (ignorar `from_me: true`). Só os remetentes com match viram alvo de registro.
+- **DM do Instagram**: não tem telefone — resolver por identidade: `recall` com o
+  `name`/`username` e conferir no resultado o canal `instagram` (`@username` bate) ou
+  o nome. Match ambíguo = pular (mesma política conservadora).
 
 Cachear os lookups na sessão (mesmo telefone aparece em vários chats). Dois chats
 privados podem resolver pro MESMO contato (chat normal + chat fantasma `@lid` do
-mesmo número): tratar como uma conversa só na hora de registrar.
+mesmo número, ou WhatsApp + Instagram da mesma pessoa): tratar como uma conversa só
+na hora de registrar.
 
 ## Passo 3 — Extrair e registrar
 
@@ -73,7 +84,7 @@ contratou, lançou, fechou contrato), dificuldade/necessidade explícita ("estou
 com X", "preciso de Y"), marco pessoal (casamento, filho, saúde mencionada abertamente).
 
 ```
-log_event(entity_id, kind='note', source='whatsapp', ts=<ts da mensagem>,
+log_event(entity_id, kind='note', source='whatsapp'|'instagram', ts=<ts da mensagem>,
           context='<fato em 1-2 frases, começando pelo verbo> — dito em <nome do chat>')
 ```
 
@@ -91,12 +102,13 @@ com o texto enriquecido — prosa curta, o que já existia + o que é novo, sem 
 Campos estruturados (e-mail, empresa, cargo) só são preenchidos se estiverem VAZIOS.
 Toda edição de perfil aparece no relatório final (o dono audita).
 
-**c) Interação real** — em chat PRIVADO com troca de verdade (mensagens nos dois
-sentidos, `from_me` e recebidas): UM evento por CONTATO por rodada (não por chat —
-o mesmo número pode aparecer em dois chats, ver Passo 2):
+**c) Interação real** — em chat PRIVADO/DM com troca de verdade (mensagens nos dois
+sentidos, `from_me` e recebidas; no Instagram, `by_agent: true` NÃO conta como troca —
+é o agente/campanha, não o dono): UM evento por CONTATO por rodada (não por chat —
+a mesma pessoa pode aparecer em dois chats, ver Passo 2):
 
 ```
-log_event(entity_id, kind='talked', source='whatsapp', ts=<ts da última mensagem>,
+log_event(entity_id, kind='talked', source='whatsapp'|'instagram', ts=<ts da última mensagem>,
           context='Conversa no WhatsApp — <tema em meia frase>')
 ```
 
@@ -117,6 +129,12 @@ não geraram evento — o cursor avança do mesmo jeito):
 
 ```bash
 node scripts/nurture-digest.mjs commit --file /tmp/nurture-commit.json
+```
+
+Instagram: mesmo desenho, chaves próprias (`ig_user_id` + `igsid`):
+
+```bash
+node C:/repos/instagram-agent/scripts/nurture-digest.mjs commit --file /tmp/ig-nurture-commit.json
 ```
 
 Chat com `truncated: true` bateu no cap de mensagens — o cursor avança até onde foi
@@ -151,9 +169,16 @@ Além do digest do dia, cada rodada faz a varredura COMPLETA de alguns contatos 
    --msgs <total_messages>`. Sem mensagem no banco = marcar com `--msgs 0` do mesmo
    jeito (não re-tentar todo dia).
 
+Instagram: contato com canal `instagram` no vault tem o mesmo tratamento, com o script
+de lá (`history --username <handle>`, controle em `ig_nurture_backfill` via
+`backfill-status --igsids` / `backfill-done --igsid ... --entity ...`). O lote diário é
+um só (WhatsApp + Instagram somados) — priorizar contatos novos de qualquer canal.
+
 ## Passo 6 — Reportar
 
-Resumo curto pro dono: N chats lidos, M eventos registrados (1 linha por evento: quem
-+ o quê), K perfis enriquecidos (visão geral/backfill), quem foi pulado por não ser
-contato — com o fato que se perdeu, como sugestão de contato novo pro dono aprovar —
-e quantos contatos ainda faltam no backfill.
+Resumo curto pro dono: N chats lidos (WhatsApp + Instagram, discriminados), M eventos
+registrados (1 linha por evento: quem + o quê), K perfis enriquecidos (visão
+geral/backfill), quem foi pulado por não ser contato — com o fato que se perdeu, como
+sugestão de contato novo pro dono aprovar — e quantos contatos ainda faltam no
+backfill. Se o repo do Instagram não estava disponível, avisar que a rodada cobriu só
+o WhatsApp.
