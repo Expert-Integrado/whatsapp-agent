@@ -100,6 +100,11 @@ if (!allowlist?.length) {
 }
 console.log(`Grupos marcados pra sincronizar: ${allowlist.length}`);
 
+// Números do PRÓPRIO dono (instâncias Z-API) ficam fora dos participantes:
+// com o toggle create_members ligado no worker, o dono viraria contato de si mesmo.
+const instances = await sb('zapi_instance?select=phone_connected');
+const ownPhones = new Set(instances.map((i) => i.phone_connected).filter(Boolean));
+
 const allowed = groups.filter((g) => allowlist.includes(g.chat_id));
 const payload = [];
 for (const g of allowed) {
@@ -107,12 +112,14 @@ for (const g of allowed) {
   payload.push({
     chat_id: g.chat_id,
     name: g.name,
-    participants: parts.filter((p) => p.phone).map((p) => ({ phone: p.phone, name: p.name ?? null })),
+    participants: parts
+      .filter((p) => p.phone && !ownPhones.has(p.phone))
+      .map((p) => ({ phone: p.phone, name: p.name ?? null })),
   });
   console.log(`  ${g.name}: ${parts.length} participantes ativos`);
 }
 
-const totals = { groups_imported: 0, members_linked: 0, members_unlinked: 0, unmatched: 0, unmatched_sample: [] };
+const totals = { groups_imported: 0, members_linked: 0, members_unlinked: 0, members_created: 0, creation_capped: 0, unmatched: 0, unmatched_sample: [] };
 for (let i = 0; i < payload.length; i += IMPORT_CHUNK) {
   const r = await worker('/whatsapp/groups/import', {
     method: 'POST',
@@ -121,6 +128,8 @@ for (let i = 0; i < payload.length; i += IMPORT_CHUNK) {
   totals.groups_imported += r.groups_imported ?? 0;
   totals.members_linked += r.members_linked ?? 0;
   totals.members_unlinked += r.members_unlinked ?? 0;
+  totals.members_created += r.members_created ?? 0;
+  totals.creation_capped += r.creation_capped ?? 0;
   totals.unmatched += r.unmatched ?? 0;
   totals.unmatched_sample.push(...(r.unmatched_sample ?? []));
 }
@@ -128,5 +137,7 @@ for (let i = 0; i < payload.length; i += IMPORT_CHUNK) {
 console.log('--- resultado ---');
 console.log(`Grupos importados: ${totals.groups_imported}`);
 console.log(`Vínculos criados: ${totals.members_linked} · desfeitos: ${totals.members_unlinked}`);
+if (totals.members_created) console.log(`Contatos criados pelo toggle membros: ${totals.members_created}`);
+if (totals.creation_capped) console.log(`Aguardando próximo run (cap de criação): ${totals.creation_capped} — rode de novo pra continuar.`);
 console.log(`Participantes sem contato correspondente: ${totals.unmatched}`);
 if (totals.unmatched_sample.length) console.log(`  amostra: ${totals.unmatched_sample.slice(0, 10).join(', ')}`);
