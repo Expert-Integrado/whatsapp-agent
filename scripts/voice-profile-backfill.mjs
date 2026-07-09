@@ -83,18 +83,39 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   process.exit(1);
 }
 
+// Retry com backoff: missão longa atravessa picos de carga do banco (statement
+// timeout 57014 vem como 500). Só re-tenta leitura idempotente ou erro de rede.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function sb(pathAndQuery, opts = {}) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, {
-    ...opts,
-    headers: {
-      apikey: SUPABASE_KEY,
-      authorization: `Bearer ${SUPABASE_KEY}`,
-      'content-type': 'application/json',
-      ...opts.headers,
-    },
-  });
-  if (!res.ok) throw new Error(`Supabase ${pathAndQuery.slice(0, 120)} → ${res.status}: ${await res.text()}`);
-  return res.status === 204 ? null : res.json();
+  const BACKOFF = [2000, 5000, 15000, 30000];
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, {
+        ...opts,
+        headers: {
+          apikey: SUPABASE_KEY,
+          authorization: `Bearer ${SUPABASE_KEY}`,
+          'content-type': 'application/json',
+          ...opts.headers,
+        },
+      });
+    } catch (e) {
+      if (attempt >= BACKOFF.length) throw e;
+      console.error(`sb: rede falhou (${e.message}) — retry em ${BACKOFF[attempt] / 1000}s`);
+      await sleep(BACKOFF[attempt]);
+      continue;
+    }
+    if (res.ok) return res.status === 204 ? null : res.json();
+    const body = await res.text();
+    const retriable = (res.status >= 500 || res.status === 429) && (!opts.method || opts.method === 'GET');
+    if (retriable && attempt < BACKOFF.length) {
+      console.error(`sb: ${res.status} — retry em ${BACKOFF[attempt] / 1000}s (${pathAndQuery.slice(0, 80)})`);
+      await sleep(BACKOFF[attempt]);
+      continue;
+    }
+    throw new Error(`Supabase ${pathAndQuery.slice(0, 120)} → ${res.status}: ${body}`);
+  }
 }
 
 // Variantes BR do 9º dígito (portado de mcp-api/index.ts normalizePhoneBR)
@@ -188,20 +209,31 @@ async function corpus() {
     }
   }
 
+  // chat_id=in.(...) com order+limit estoura statement timeout (57014) em chat
+  // gigante: o planner desiste do índice composto. eq por chat usa o índice direto;
+  // merge + sort + cap no cliente é equivalente (união dos top-N de cada chat).
+  async function sbPerChat(ids, buildQuery, { asc = false, cap } = {}) {
+    let rows = [];
+    for (const id of ids) rows = rows.concat(await sb(buildQuery(encodeURIComponent(id))));
+    rows.sort((a, b) => (a.message_ts < b.message_ts ? -1 : a.message_ts > b.message_ts ? 1 : 0));
+    if (!asc) rows.reverse();
+    return cap ? rows.slice(0, cap) : rows;
+  }
+
   const contacts = [];
-  let skippedFewMsgs = 0;
+  let skippedFewMsgs = 0, erroredContacts = 0;
   for (const t of targets) {
+    try {
     const lids = new Set();
     for (const v of t.variants) for (const l of lidsByPhone.get(v) || []) lids.add(l);
     const dmIds = [...new Set([t.chat_id, ...t.folded_chat_ids, ...lids])];
 
     // DMs inbound (transcrição de áudio cacheada em content conta — gíria vive em áudio)
-    const dmRaw = await sb(
+    const dmRaw = await sbPerChat(dmIds, (id) =>
       `messages?select=message_ts,message_type,content,caption` +
-      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=${inList(dmIds)}` +
+      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=eq.${id}` +
       `&from_me=eq.false&is_deleted=eq.false` +
-      `&order=message_ts.desc&limit=${MSG_CAP}`
-    );
+      `&order=message_ts.desc&limit=${MSG_CAP}`, { cap: MSG_CAP });
     const dmMsgs = dmRaw
       .map((m) => ({ ts: m.message_ts, type: m.message_type, text: cleanText(m), _m: m }))
       .filter((m) => isUseful(m._m, m.text))
@@ -211,22 +243,20 @@ async function corpus() {
 
     // Varredura longitudinal de vocativos (asc: pega apelido antigo fora da janela recente)
     const orVoc = encodeURIComponent(`(${VOCATIVE_PATTERNS.map((p) => `content.ilike.*${p}*`).join(',')})`);
-    const vocRaw = await sb(
+    const vocRaw = await sbPerChat(dmIds, (id) =>
       `messages?select=message_ts,content` +
-      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=${inList(dmIds)}` +
+      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=eq.${id}` +
       `&from_me=eq.false&is_deleted=eq.false&or=${orVoc}` +
-      `&order=message_ts.asc&limit=${VOC_CAP}`
-    );
+      `&order=message_ts.asc&limit=${VOC_CAP}`, { asc: true, cap: VOC_CAP });
     const vocativeHits = vocRaw.map((m) => ({ ts: m.message_ts, text: (m.content || '').trim().slice(0, CONTENT_MAX) }));
 
     // OUTBOUND autêntico do dono (aprende como_chamo). Puxa com folga (x2): parte
     // cai no filtro de autenticidade (fromApi ausente pós-cutoff).
-    const outRaw = await sb(
+    const outRaw = await sbPerChat(dmIds, (id) =>
       `messages?select=message_ts,message_type,content,caption,from_api:raw_payload->>fromApi` +
-      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=${inList(dmIds)}` +
+      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=eq.${id}` +
       `&from_me=eq.true&is_deleted=eq.false&sent_by_agent=eq.false` +
-      `&order=message_ts.desc&limit=${OUT_CAP * 2}`
-    );
+      `&order=message_ts.desc&limit=${OUT_CAP * 2}`, { cap: OUT_CAP * 2 });
     const outMsgs = outRaw
       .filter((m) => m.from_api !== 'true' && isAuthenticOwner(m))
       .map((m) => ({ ts: m.message_ts, type: m.message_type, text: cleanText(m), _m: m }))
@@ -237,12 +267,11 @@ async function corpus() {
 
     // Varredura longitudinal de vocativos TAMBÉM no outbound (apelido antigo que o
     // dono usava com a pessoa; asc pega o começo da relação, quase sempre pré-agente)
-    const outVocRaw = await sb(
+    const outVocRaw = await sbPerChat(dmIds, (id) =>
       `messages?select=message_ts,content,from_api:raw_payload->>fromApi` +
-      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=${inList(dmIds)}` +
+      `&instance_id=eq.${encodeURIComponent(INST)}&chat_id=eq.${id}` +
       `&from_me=eq.true&is_deleted=eq.false&sent_by_agent=eq.false&or=${orVoc}` +
-      `&order=message_ts.asc&limit=${VOC_CAP}`
-    );
+      `&order=message_ts.asc&limit=${VOC_CAP}`, { asc: true, cap: VOC_CAP });
     const outVocativeHits = outVocRaw
       .filter((m) => m.from_api !== 'true' && isAuthenticOwner(m))
       .map((m) => ({ ts: m.message_ts, text: (m.content || '').trim().slice(0, CONTENT_MAX) }));
@@ -301,6 +330,12 @@ async function corpus() {
       stats: { dm_fetched: dmRaw.length, dm_kept: dmMsgs.length, dm_truncated: dmRaw.length === MSG_CAP, owner_kept: outMsgs.length, group_kept: groupMsgs.length },
     });
     console.error(`corpus: ${t.chat_name || t.chat_id} — ${dmMsgs.length} DM${dmThin ? ' (fraca, resgate por grupo)' : ''}, ${outMsgs.length} dono, ${vocativeHits.length} vocativo-hit, ${groupMsgs.length} grupo`);
+    } catch (e) {
+      // Contato com erro não derruba a rodada — fica voice_profile NULL, mas o cursor
+      // passa por ele: rodada final de catch-up (sem --before) revarre os que sobraram.
+      erroredContacts++;
+      console.error(`corpus: ERRO em ${t.chat_name || t.chat_id} (pulado): ${e.message.slice(0, 160)}`);
+    }
   }
 
   const files = [];
@@ -312,7 +347,7 @@ async function corpus() {
   }
   console.error(
     `corpus: ${contacts.length} contato(s) em ${files.length} batch(es) → ${outDir}\n` +
-    `pulados: ${skippedFewMsgs} sem evidência (DM fraca e sem resgate por grupo), ${skippedNonNumeric} chat_id não-numérico.\n` +
+    `pulados: ${skippedFewMsgs} sem evidência (DM fraca e sem resgate por grupo), ${skippedNonNumeric} chat_id não-numérico, ${erroredContacts} com erro (catch-up no fim).\n` +
     `CURSOR: next_before=${nextBefore ?? 'FIM'} exhausted=${exhausted}` +
     (exhausted ? ' — fila varrida até o fim.' : ' — próxima rodada: --before nesse valor.')
   );
