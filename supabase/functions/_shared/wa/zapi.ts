@@ -306,7 +306,11 @@ export class ZapiProvider implements WaProvider {
       case "ReceivedCallback":
         return zapiHandleReceived(p);
       case "DeliveryCallback":
-        return zapiHandleReceived({ ...p, fromMe: true });
+        // Ack de entrega: só traz zaapId/messageId, sem conteúdo. Não gerar
+        // evento de mensagem — senão criaria uma linha placeholder
+        // (message_type='unknown', content=null) que depois bloqueia (UNIQUE
+        // 23505) o echo real de saída que traz o texto.
+        return [];
       case "MessageStatusCallback":
         return zapiHandleStatus(p);
       case "MessageReactionCallback":
