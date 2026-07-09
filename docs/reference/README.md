@@ -23,4 +23,4 @@ O caminho completo, passo a passo, está em [ARQUITETURA.md → fluxo inbound](A
 
 ---
 
-> Estes documentos descrevem o **estado atual** (pós-migration 0031) e foram verificados contra o código. Ao alterar schema, functions ou tools, atualize o documento correspondente na mesma mudança.
+> Estes documentos descrevem o **estado atual** (pós-migration 0040) e foram verificados contra o código. Ao alterar schema, functions ou tools, atualize o documento correspondente na mesma mudança.

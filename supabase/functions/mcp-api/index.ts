@@ -20,7 +20,7 @@ const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 // JWT legado (passa no verify_jwt das edges de envio). A SUPABASE_SERVICE_ROLE_KEY
 // auto-injetada pode estar em formato novo (nao-JWT) e ser rejeitada pelo gateway.
 const INTERNAL_JWT = Deno.env.get("INTERNAL_EDGE_JWT") || SERVICE_KEY;
-// Chamada interna edge->edge pras edges de envio existentes (send-message/voice/zapi-proxy).
+// Chamada interna edge->edge pras edges de envio existentes (send-message/voice/wa-proxy).
 async function callEdge(name: string, body: unknown): Promise<{ status: number; data: any }> {
   const r = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
     method: "POST",
@@ -61,9 +61,12 @@ function b64url(bytes: Uint8Array): string {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 function b64urlStr(s: string): string { return b64url(enc.encode(s)); }
-function b64urlToBytes(s: string): Uint8Array {
+function b64urlToBytes(s: string): Uint8Array<ArrayBuffer> {
   s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
-  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const bin = atob(s);
+  const out = new Uint8Array(new ArrayBuffer(bin.length));
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 async function hmacKey(secret: string): Promise<CryptoKey> {
   return await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
@@ -315,6 +318,21 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
         if (lids.every(() => phoneVariants.includes(phoneCanonical)))
           return { chat_id: phoneCanonical, chat_name: numericos[0].chat_name || numericos[0].contact_name, instance_id: numericos[0].instance_id };
       }
+      // Par real + fantasma do 9o digito: dois chats numericos, mesma instancia,
+      // variantes um do outro. O real tem identidade (nome de contato ou chat_name
+      // diferente do proprio numero); o fantasma nao — e nao pode vencer por recencia,
+      // porque envios engolidos renovam o last_message_at dele.
+      if (numericos.length === 2 && numericos[0].instance_id === numericos[1].instance_id
+          && normalizePhoneBR(String(numericos[0].chat_id)).includes(String(numericos[1].chat_id))) {
+        // Na view, contact_name = chat_name; fantasma tem nome = proprio numero.
+        const hasIdentity = (c: any) => {
+          const n = c.chat_name || c.contact_name;
+          return !!n && n !== c.chat_id;
+        };
+        const [a, b] = numericos;
+        const real = hasIdentity(a) && !hasIdentity(b) ? a : (hasIdentity(b) && !hasIdentity(a) ? b : null);
+        if (real) return { chat_id: real.chat_id, chat_name: real.chat_name || real.contact_name, instance_id: real.instance_id };
+      }
       const ranked = exact.map((c: any) => ({ ...c, _score: applyChatBoost(50, c) })).sort((a: any, b: any) => b._score - a._score);
       if (ranked[0]._score - ranked[1]._score >= 5) return { chat_id: ranked[0].chat_id, chat_name: ranked[0].chat_name || ranked[0].contact_name, instance_id: ranked[0].instance_id };
       return { candidates: ranked.slice(0, 5).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, instance: c.instance_id })) };
@@ -360,6 +378,25 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
   return { candidates: scored.slice(0, 10).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, last_message_at: c.last_message_at, instance: c.instance_id })) };
 }
 
+// ─── Canonicalizacao do 9o digito (bug do chat fantasma — ClickUp 86ajby187) ──
+// Contas BR antigas sao registradas SEM o 9o digito. Enviar pro numero com 9
+// quando a conta e sem-9 cria um chat fantasma na Z-API: a 1a msg chega (remap
+// do WhatsApp), as seguintes morrem no orfao e a API segue respondendo 200.
+// GET /phone-exists/{phone} devolve o numero canonico registrado + lid.
+async function canonicalizePhone(digits: string, instanceId: string): Promise<{ exists: boolean; phone?: string; lid?: string; error?: string }> {
+  const { status, data } = await callEdge("wa-proxy", {
+    action: "phone-exists", params: { phone: digits },
+    agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: instanceId,
+  });
+  if (status >= 400) return { exists: false, error: data?.error || `wa-proxy ${status}` };
+  const raw = data?.result;
+  const r = Array.isArray(raw) ? raw[0] : raw;
+  if (!r || typeof r.exists !== "boolean") return { exists: false, error: "resposta inesperada do phone-exists" };
+  // phone (Z-API) | number/jid (Evolution chat/whatsappNumbers) — parsing tolerante aos dois shapes
+  const canonical = String(r.phone ?? r.number ?? (r.jid ?? "").split("@")[0]).replace(/\D/g, "");
+  return { exists: r.exists, ...(canonical && { phone: canonical }), ...(r.lid && { lid: String(r.lid) }) };
+}
+
 // delay de digitacao humanizado (portado do mcp/index.js — antes era client-side)
 function humanizedTypingSeconds(type: string, content: string): number {
   const len = (content || "").length;
@@ -371,7 +408,10 @@ function humanizedTypingSeconds(type: string, content: string): number {
 
 // ─── Voice guide — regras hard universais (portado do mcp/index.js) ───────────
 const HARD_RULES: { id: string; pattern: RegExp; severity: string; message: string }[] = [
-  { id: "tu-pronome", pattern: /\b(tu|teu|tua|teus|tuas|ti)\b/iu, severity: "high", message: "Detectado uso de 'tu/teu/tua' — voice guide proibe em qualquer estrato. o dono usa 'vc'/'seu'." },
+  // NOTA: pronome (tu/você) NÃO entra aqui. É traço PESSOAL/REGIONAL de cada dono,
+  // não um fingerprint universal de IA — quem usa "tu" e quem usa "você" estão ambos certos.
+  // A escolha de pronome fica a cargo do voice_guide de cada instância (public.voice_guide),
+  // nunca hardcoded como regra global. (Regra "tu-pronome" removida em v3.0.2.)
   { id: "em-dash", pattern: /—/, severity: "high", message: "Detectado em-dash (—) — fingerprint de IA. Voice guide manda virgula, dois-pontos, parenteses ou '..'." },
   { id: "saudacao-generica", pattern: /(?:^|[\s,!?;:.])(ol[áa]|prezad[oa]|cordialmente|atenciosamente|esp[ée]ro que esteja bem)(?=$|[\s,!?;:.])/iu, severity: "high", message: "Detectada saudacao generica/formal. Voice guide manda 'Fala [Nome], beleza?' ou direto no assunto." },
   { id: "hype", pattern: /(?:^|[\s,!?;:.])(revolucion[áa]ri[oa]|transformador|disruptivo|game[- ]?changer|mindset|f[óo]rmula m[áa]gica)(?=$|[\s,!?;:.])/iu, severity: "high", message: "Detectado vocabulario de hype. Voice guide proibe — user posiciona com contencao." },
@@ -380,21 +420,129 @@ const HARD_RULES: { id: string; pattern: RegExp; severity: string; message: stri
   { id: "validacao-afetiva", pattern: /\b(te entendo|imagino como (voc[êe]|vc) (est[áa]|t[áa])|faz sentido (sua|tua) preocupa[çc][ãa]o|fica tranquil[oa] (que|q) vamos)\b/iu, severity: "high", message: "Detectada validacao afetiva. Voice guide regra hard: frontalidade nao inclui validar emocao — devolve pergunta de plano." },
   { id: "rsrs", pattern: /\brsrs\w*\b/iu, severity: "medium", message: "Detectado 'rsrs'. Voice guide aceita 'kkk' ou 'rs' solto fim-de-frase, mas nao 'rsrs'." },
 ];
-function checkVoiceViolations(content: string) {
+// Regras hard PESSOAIS do dono vem do banco (voice_guide.checks.hard_rules) como
+// regex serializada. Regex invalida e ignorada silenciosamente (nao derruba o check).
+function compileCustomRules(checks: any): { id: string; pattern: RegExp; severity: string; message: string }[] {
+  if (!Array.isArray(checks?.hard_rules)) return [];
+  const out: { id: string; pattern: RegExp; severity: string; message: string }[] = [];
+  for (const r of checks.hard_rules) {
+    if (!r?.id || !r?.pattern || !r?.message) continue;
+    try { out.push({ id: r.id, pattern: new RegExp(r.pattern, r.flags ?? "iu"), severity: r.severity ?? "medium", message: r.message }); } catch { /* regex invalida */ }
+  }
+  return out;
+}
+function checkVoiceViolations(content: string, customRules: { id: string; pattern: RegExp; severity: string; message: string }[] = []) {
   if (!content || typeof content !== "string") return [];
   const out: any[] = [];
-  for (const rule of HARD_RULES) {
+  for (const rule of [...HARD_RULES, ...customRules]) {
     const m = content.match(rule.pattern);
     if (m) out.push({ id: rule.id, severity: rule.severity, message: rule.message, match: m[0] });
   }
   return out;
 }
+
+// ─── Soft signals — fingerprints ESTRUTURAIS de simulacao (portado do mcp/voice-check.js v2.11) ───
+// Diferente das regras hard: nao aponta um match binario, mas um padrao estatistico
+// (msg-monolito, reticencias uniformes, cadeia de setas, caixa 100% minuscula, burst
+// inflado, assinaturas empilhadas). O MOTOR e generico e universal — a mensagem-chave
+// do blind test que originou isso: UNIFORMIDADE E FINGERPRINT (voz humana e distribuicao,
+// voz simulada e ponto fixo). Thresholds, assinaturas e mensagens calibradas com o corpus
+// do dono vem de voice_guide.checks.soft; defaults neutros abaixo. Sempre warning-only.
+const SOFT_DEFAULTS = {
+  signatures: [] as string[],
+  max_prose_chars: 250,
+  multiline_lines: 3,
+  multiline_chars: 200,
+  ellipsis_min_runs: 3,
+  arrows_min: 2,
+  lowercase_min_units: 3,
+  burst_max: 4,
+  messages: {} as Record<string, string>,
+};
+// URLs nao sao prosa: nao contam pra comprimento nem pra deteccao de setas.
+function stripUrls(s: string): string { return s.replace(/https?:\/\/\S+/g, ""); }
+function checkSoftSignals(content: string | string[], softCfg: any = null) {
+  const cfg = { ...SOFT_DEFAULTS, ...(softCfg ?? {}) };
+  const msg = (id: string, fallback: string) => cfg.messages?.[id] ?? fallback;
+  const warnings: any[] = [];
+  const isArray = Array.isArray(content);
+  const messages: any[] = isArray ? content : [content];
+
+  // Assinaturas fortes empilhadas (max 1 por resposta)
+  const joined = messages.filter((m) => typeof m === "string").join(" ").toLowerCase();
+  if (joined && Array.isArray(cfg.signatures) && cfg.signatures.length) {
+    const found = cfg.signatures.filter((sig: string) => joined.includes(String(sig).toLowerCase()));
+    if (found.length > 1) warnings.push({ id: "assinaturas-empilhadas", severity: "soft",
+      message: msg("assinaturas-empilhadas", `Detectadas ${found.length} assinaturas fortes empilhadas na mesma msg (${found.join(", ")}). Maximo 1 assinatura forte por resposta.`) });
+  }
+
+  for (const m of messages) {
+    if (typeof m !== "string") continue;
+    const semUrl = stripUrls(m);
+
+    // Msg-monolito: prosa real de chat e curta; conteudo longo vira burst de sends.
+    if (semUrl.length > cfg.max_prose_chars) warnings.push({ id: "msg-longa", severity: "soft",
+      message: msg("msg-longa", `Mensagem unica com ${semUrl.length} chars de prosa (fora URLs). Chat real fragmenta em sends separados — memo-monolito e fingerprint.`) });
+
+    const lines = m.split("\n").map((l: string) => l.trim()).filter(Boolean);
+    if (lines.length >= cfg.multiline_lines && semUrl.length > cfg.multiline_chars) warnings.push({ id: "bolha-multilinha", severity: "soft",
+      message: msg("bolha-multilinha", `Bolha unica com ${lines.length} linhas e ${semUrl.length} chars de prosa. Chat real prefere sends separados — considere fragmentar em burst.`) });
+
+    // Uniformidade de reticencias: humano MISTURA '..' e '...'; ponto fixo e simulacao.
+    // '…' unicode (autocorrect/IA) normalizado pra '...' — tambem conta como run.
+    const runs = m.replace(/…/g, "...").match(/\.{2,}/g) || [];
+    if (runs.length >= cfg.ellipsis_min_runs && new Set(runs.map((r: string) => r.length)).size === 1) {
+      warnings.push({ id: "uniformidade-reticencias", severity: "soft",
+        message: msg("uniformidade-reticencias", `${runs.length} reticencias todas do mesmo tamanho ('${runs[0]}'). Voz humana varia o tamanho das runs na mesma msg — uniformidade e fingerprint.`) });
+    }
+
+    // Cadeia de setas 'X > Y > Z' (estilo documentacao, ninguem digita assim em chat).
+    // Matching por linha (nao atravessa \n), ignora quote-reply ('>' no inicio),
+    // comparacao numerica ('> 5', '> R$') e setas dentro de URL (ja stripadas).
+    let setas = 0;
+    for (const line of semUrl.split("\n")) {
+      if (/^\s*>/.test(line)) continue;
+      setas += (line.match(/\S[ \t]*[>→»](?![ \t]*(?:\d|R\$|%))[ \t]*\S/g) || []).length;
+    }
+    if (setas >= cfg.arrows_min) warnings.push({ id: "cadeia-setas", severity: "soft",
+      message: msg("cadeia-setas", "Cadeia de setas 'X > Y > Z' detectada — estilo de documentacao. Passo-a-passo em chat se escreve corrido, ou vira audio/print.") });
+  }
+
+  // Caixa uniforme minuscula: vale pra linhas de uma bolha multi-linha E pra msgs de um burst.
+  const units: string[] = [];
+  for (const m of messages) {
+    if (typeof m !== "string") continue;
+    for (const line of m.split("\n")) { const t = line.trim(); if (t) units.push(t); }
+  }
+  const letterStarts = units.map((u) => (u.match(/^[A-Za-zÀ-ÖØ-öø-ÿ]/) || [null])[0]).filter(Boolean) as string[];
+  if (letterStarts.length >= cfg.lowercase_min_units && letterStarts.every((ch) => ch === ch.toLowerCase())) {
+    warnings.push({ id: "caixa-uniforme-minuscula", severity: "soft",
+      message: msg("caixa-uniforme-minuscula", `${letterStarts.length} linhas/msgs TODAS comecando minusculas. Alternar a caixa — 100% minusculo e tao fingerprint quanto 100% capitalizado.`) });
+  }
+
+  // Burst inflado — conta so mensagens reais (string nao-vazia).
+  const msgsReais = messages.filter((mm) => typeof mm === "string" && mm.trim().length > 0).length;
+  if (isArray && msgsReais > cfg.burst_max) warnings.push({ id: "burst-inflado", severity: "soft",
+    message: msg("burst-inflado", `Burst com ${msgsReais} mensagens. Chat real fragmenta em 2-${cfg.burst_max} — acima disso e inflado.`) });
+
+  return warnings;
+}
+
+// Score 0-10: 10 - 3*high - 1.5*medium - 0.5*low - 0.5*soft, floor em 0. Score < 7 = regenerar.
+function computeVoiceScore(violations: any[], softWarnings: any[]): number {
+  const weights: Record<string, number> = { high: 3, medium: 1.5, low: 0.5 };
+  let score = 10;
+  for (const v of violations) score -= weights[v.severity] ?? 0;
+  score -= 0.5 * softWarnings.length;
+  return Math.max(0, Math.round(score * 10) / 10);
+}
+
 async function loadVoiceGuide(instanceId?: string | null): Promise<any | null> {
   if (instanceId) {
-    const { data } = await supabase.from("voice_guide").select("content,instance_id,updated_at").eq("instance_id", instanceId).maybeSingle();
+    const { data } = await supabase.from("voice_guide").select("content,checks,instance_id,updated_at").eq("instance_id", instanceId).maybeSingle();
     if (data) return data;
   }
-  const { data } = await supabase.from("voice_guide").select("content,instance_id,updated_at").is("instance_id", null).maybeSingle();
+  const { data } = await supabase.from("voice_guide").select("content,checks,instance_id,updated_at").is("instance_id", null).maybeSingle();
   return data ?? null;
 }
 
@@ -461,7 +609,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (error) return json({ error: error.message }, 500);
 
         let catQ = supabase.from("v_chats_with_categories").select("category_slugs,category_labels,linked_pipedrive_person_id").eq("chat_id", resolved.chat_id);
-        let metaQ = supabase.from("chats").select("observations,links").eq("chat_id", resolved.chat_id);
+        let metaQ = supabase.from("chats").select("observations,links,voice_profile,brain_contact_id").eq("chat_id", resolved.chat_id);
         if (resolved.instance_id) { catQ = catQ.eq("instance_id", resolved.instance_id); metaQ = metaQ.eq("instance_id", resolved.instance_id); }
         const [catRes, metaRes] = await Promise.all([catQ.maybeSingle(), metaQ.maybeSingle()]);
         const catRow: any = catRes.data, chatMeta: any = metaRes.data;
@@ -473,6 +621,8 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           instance: resolved.instance_id,
           ...(chatMeta?.observations && { observations: chatMeta.observations }),
           ...(chatMeta?.links?.length && { links: chatMeta.links }),
+          ...(chatMeta?.voice_profile && { voice_profile: chatMeta.voice_profile }),
+          ...(chatMeta?.brain_contact_id && { brain_contact_id: chatMeta.brain_contact_id }),
           categories: catRow?.category_slugs || [],
           category_labels: catRow?.category_labels || [],
           ...(catRow?.linked_pipedrive_person_id && { linked_pipedrive_person_id: catRow.linked_pipedrive_person_id }),
@@ -672,14 +822,39 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       }
 
       case "annotate": {
-        const { chat, observations, links, instance } = params;
-        if (!observations && !links) return json({ error: "Passe ao menos observations ou links." }, 400);
+        const { chat, observations, links, voice_profile, brain_contact_id, instance } = params;
+        if (observations === undefined && links === undefined && voice_profile === undefined && brain_contact_id === undefined)
+          return json({ error: "Passe ao menos observations, links, voice_profile ou brain_contact_id." }, 400);
         const resolved = await resolveChat(chat, instance);
         if (resolved.error) return json({ error: resolved.error }, 400);
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
         const update: any = {};
         if (observations !== undefined) update.observations = observations;
         if (links !== undefined) update.links = links;
+        if (brain_contact_id !== undefined) {
+          if (brain_contact_id !== null && typeof brain_contact_id !== "string")
+            return json({ error: "brain_contact_id deve ser string (id do vault expert-contacts) ou null pra desvincular." }, 400);
+          update.brain_contact_id = brain_contact_id;
+        }
+        if (voice_profile !== undefined) {
+          if (voice_profile === null) {
+            update.voice_profile = null; // limpar explicitamente
+          } else if (typeof voice_profile !== "object" || Array.isArray(voice_profile)) {
+            return json({ error: "voice_profile deve ser um objeto JSON (ou null pra limpar)." }, 400);
+          } else {
+            // MERGE RASO por chave de topo: atualizar so 'girias' preserva 'como_me_chama'.
+            // Arrays SUBSTITUEM (sem union) — leia o perfil atual no read e mande o array
+            // completo. Chave com valor null remove a chave. Read-modify-write e aceitavel
+            // aqui (tool single-owner); se surgir concorrencia real, virar RPC com || jsonb.
+            let curQ = supabase.from("chats").select("voice_profile").eq("chat_id", resolved.chat_id);
+            if (resolved.instance_id) curQ = curQ.eq("instance_id", resolved.instance_id);
+            const { data: cur } = await curQ.maybeSingle();
+            const merged: any = { ...((cur as any)?.voice_profile ?? {}), ...voice_profile };
+            for (const k of Object.keys(merged)) if (merged[k] === null) delete merged[k];
+            if (!("analisado_em" in voice_profile)) merged.analisado_em = new Date().toISOString();
+            update.voice_profile = merged;
+          }
+        }
         let updateQ = supabase.from("chats").update(update).eq("chat_id", resolved.chat_id);
         if (resolved.instance_id) updateQ = updateQ.eq("instance_id", resolved.instance_id);
         const { error } = await updateQ;
@@ -695,8 +870,8 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (error || !media) return json({ error: "Nenhuma midia associada a esta mensagem." }, 404);
         let public_url: string | null = null;
         if (media.storage_path && media.download_status === "done") {
-          const { data } = supabase.storage.from(media.storage_bucket).getPublicUrl(media.storage_path);
-          public_url = data?.publicUrl ?? null;
+          const { data } = await supabase.storage.from(media.storage_bucket).createSignedUrl(media.storage_path, 3600);
+          public_url = data?.signedUrl ?? null;
         }
         return json({
           ok: true, public_url, original_url: media.original_url, mime_type: media.mime_type,
@@ -721,10 +896,20 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           if (!allow_new) return json({ ok: false, error: looksLikePhone ? `Numero "${to}" nao esta em chats. Passe allow_new=true pra primeiro contato.` : resolved.error });
           if (!looksLikePhone) return json({ error: `allow_new=true so com phone valido (10-13 digitos).` }, 400);
           if (!wantInstance) return json({ error: `Primeiro contato (allow_new) exige 'instance'.` }, 400);
-          const newChatId = digits.startsWith("55") ? digits : `55${digits}`;
+          // Canonicaliza o 9o digito via phone-exists ANTES de criar o chat: usar o
+          // numero como digitado cria chat fantasma quando a conta e registrada sem o 9.
+          const typedPhone = digits.startsWith("55") ? digits : `55${digits}`;
+          const check = await canonicalizePhone(typedPhone, wantInstance);
+          if (!check.error && !check.exists) return json({ ok: false, error: `Numero "${to}" nao tem WhatsApp (verificado via phone-exists).` }, 400);
+          const newChatId = check.phone || typedPhone;
           const { error: insErr } = await supabase.from("chats").upsert({ instance_id: wantInstance, chat_id: newChatId, phone: newChatId, chat_name: newChatId, is_group: false, last_message_at: new Date().toISOString() }, { onConflict: "instance_id,chat_id" });
           if (insErr) return json({ error: `Falha ao criar chat: ${insErr.message}` }, 500);
-          resolved = { chat_id: newChatId, chat_name: newChatId, instance_id: wantInstance, _new: true };
+          if (check.lid) {
+            await supabase.from("lid_mapping").upsert({ instance_id: wantInstance, lid: check.lid, phone: newChatId, resolved_via: "zapi" }, { onConflict: "instance_id,lid" });
+          }
+          resolved = { chat_id: newChatId, chat_name: newChatId, instance_id: wantInstance, _new: true,
+            ...(check.error && { _phone_unverified: check.error }),
+            ...(newChatId !== typedPhone && { _canonicalized_from: typedPhone }) };
         }
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
         if (type !== "text" && !media_url) return json({ error: `media_url obrigatorio pra type "${type}".` }, 400);
@@ -755,7 +940,10 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(mentions?.length && { mentions }), ...(mentions_everyone && { mentions_everyone: true }) };
         const { status, data } = await callEdge("send-message", sendBody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-message ${status}`, detail: data }, status);
-        return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance });
+        return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance,
+          ...(resolved._canonicalized_from && { phone_canonicalized: { typed: resolved._canonicalized_from, canonical: resolved.chat_id } }),
+          ...(resolved._phone_unverified && { warning: `phone-exists indisponivel (${resolved._phone_unverified}); numero usado como digitado — confirme entrega com check_delivery.` }),
+          ...(resolved._new && { delivery_hint: "Primeiro contato: confirme a entrega com check_delivery (message_id) apos alguns segundos." }) });
       }
 
       case "send_voice": {
@@ -881,8 +1069,32 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       }
 
       case "check_message": {
-        const violations = checkVoiceViolations(params.content);
-        return json({ ok: true, has_violations: violations.length > 0, violations_count: violations.length, violations, ...(violations.length ? { hint: "Use get_voice_guide pra ler o documento e reescrever respeitando as regras hard." } : { message: "Nenhuma violacao hard. Texto compativel com o voice guide." }) });
+        // content: string OU array de strings (burst) — o array habilita os sinais
+        // estruturais de conjunto (burst inflado, caixa uniforme cross-msgs).
+        const g = await loadVoiceGuide(params.instance ? await resolveInstanceKey(params.instance) : null);
+        const customRules = compileCustomRules(g?.checks);
+        const messages: any[] = Array.isArray(params.content) ? params.content : [params.content];
+        const violations: any[] = [];
+        const seen = new Set<string>();
+        for (const m of messages) {
+          for (const v of checkVoiceViolations(m, customRules)) {
+            const key = v.id + "|" + v.match;
+            if (!seen.has(key)) { seen.add(key); violations.push(v); }
+          }
+        }
+        const soft_warnings = checkSoftSignals(params.content, g?.checks?.soft);
+        const score = computeVoiceScore(violations, soft_warnings);
+        return json({
+          ok: true, score,
+          has_violations: violations.length > 0, violations_count: violations.length, violations,
+          soft_warnings_count: soft_warnings.length, soft_warnings,
+          ...(g?.checks ? {} : { note: "Calibracao pessoal (voice_guide.checks) nao configurada — rodando so regras universais com defaults neutros." }),
+          hint: score < 7
+            ? "Score abaixo de 7: regenere a mensagem. Use get_voice_guide pra ler o documento e reescrever respeitando as regras."
+            : (violations.length || soft_warnings.length)
+              ? "Score aceitavel, mas revise os warnings antes de enviar."
+              : "Nenhuma violacao. Texto compativel com o voice guide.",
+        });
       }
 
       case "setup_voice_guide": {
@@ -890,9 +1102,56 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         return json({
           ok: true,
           status: g ? "active" : "not_configured",
-          ...(g ? { scope: g.instance_id ?? "global", content_length: g.content.length, updated_at: g.updated_at } : { setup: "INSERT INTO voice_guide (content) VALUES ('<seu markdown>'); -- instance_id NULL = global" }),
+          ...(g ? { scope: g.instance_id ?? "global", content_length: g.content.length, updated_at: g.updated_at,
+                    checks_configured: !!g.checks, custom_hard_rules: compileCustomRules(g.checks).length }
+                : { setup: "INSERT INTO voice_guide (content) VALUES ('<seu markdown>'); -- instance_id NULL = global. Calibracao pessoal do check: coluna checks (ver 0032_voice_checks.sql)." }),
           hard_rules: HARD_RULES.map((r) => ({ id: r.id, severity: r.severity, message: r.message })),
         });
+      }
+
+      case "check_delivery": {
+        // Verificacao de entrega: o process-webhook ja grava delivered/read no
+        // send_status via MessageStatusCallback; aqui esse dado vira acao. Mensagem
+        // de agente presa em sent/pending e o sintoma classico de chat fantasma.
+        const { message_id, chat, limit = 10, instance } = params;
+        if (!message_id && !chat) return json({ error: "Forneca message_id OU chat." }, 400);
+        let q = supabase.from("messages")
+          .select("id,chat_id,instance_id,message_type,content,send_status,send_error,message_ts")
+          .eq("from_me", true).eq("sent_by_agent", true)
+          .order("message_ts", { ascending: false }).limit(Math.min(50, Number(limit) || 10));
+        if (message_id) q = q.eq("id", message_id);
+        else {
+          const resolved = await resolveChat(chat, instance);
+          if (resolved.error) return json({ error: resolved.error }, 400);
+          if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
+          q = q.eq("chat_id", resolved.chat_id);
+          if (resolved.instance_id) q = q.eq("instance_id", resolved.instance_id);
+        }
+        const { data: rows, error } = await q;
+        if (error) return json({ error: error.message }, 500);
+        if (!rows?.length) return json({ ok: true, messages: [], message: "Nenhuma mensagem de agente encontrada." });
+        const STUCK_MS = 2 * 60 * 1000;
+        const out = rows.map((m: any) => {
+          const ageMs = m.message_ts ? Date.now() - new Date(m.message_ts).getTime() : 0;
+          const delivered = m.send_status === "delivered" || m.send_status === "read";
+          const stuck = !delivered && (m.send_status === "sent" || m.send_status === "pending") && ageMs > STUCK_MS;
+          return { id: m.id, chat_id: m.chat_id, instance: m.instance_id, send_status: m.send_status,
+                   ...(m.send_error && { send_error: m.send_error }), message_ts: m.message_ts, message_ts_brt: toBRT(m.message_ts),
+                   preview: (m.content || `[${m.message_type}]`).slice(0, 80), delivered, stuck };
+        });
+        const stuckCount = out.filter((m: any) => m.stuck).length;
+        return json({ ok: true, messages: out, stuck_count: stuckCount,
+          ...(stuckCount ? { alert: "Mensagem(ns) sem confirmacao de entrega ha 2+ min. Possivel chat fantasma do 9o digito: rode merge_ghost_chats (dry_run) e confira o numero canonico via zapi_action phone-exists." } : {}) });
+      }
+
+      case "merge_ghost_chats": {
+        // Funde pares real+fantasma do 9o digito ja existentes no banco.
+        // dry_run=true (default) so lista o que seria feito.
+        const { dry_run = true } = params;
+        const { data, error } = await supabase.rpc("merge_ninth_digit_ghosts", { p_dry_run: dry_run !== false });
+        if (error) return json({ error: error.message, hint: "Migration 0031_merge_ninth_digit_ghosts.sql aplicada?" }, 500);
+        const rows = data || [];
+        return json({ ok: true, dry_run: dry_run !== false, pairs: rows.length, results: rows });
       }
 
       default: return json({ error: "action_not_implemented", action }, 400);
@@ -917,7 +1176,7 @@ function rpc(id: any, payload: Record<string, unknown>): Response {
 const rpcResult = (id: any, result: unknown) => rpc(id, { result });
 const rpcError = (id: any, code: number, message: string) => rpc(id, { error: { code, message } });
 
-const SERVER_INFO = { name: "whatsapp-agent", version: "3.0.0" };
+const SERVER_INFO = { name: "whatsapp-agent", version: "3.2.0" };
 const PROTOCOL_VERSION = "2024-11-05";
 
 // Schemas expostos no tools/list — MVP: status, inbox, read.
@@ -948,7 +1207,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "read",
-    description: "Le as mensagens de uma conversa em ordem cronologica e JA transcreve os audios pendentes (Whisper) — use pra 'transcreve/resume a conversa com X' ou 'o que o fulano mandou'. 'chat' aceita nome, telefone ou chat_id; se ambiguo, retorna candidatos. Cada audio vem com o campo transcription.",
+    description: "Le as mensagens de uma conversa em ordem cronologica e JA transcreve os audios pendentes (Whisper) — use pra 'transcreve/resume a conversa com X' ou 'o que o fulano mandou'. 'chat' aceita nome, telefone ou chat_id; se ambiguo, retorna candidatos. Cada audio vem com o campo transcription. Se o chat tiver voice_profile, ele vem na resposta: ESPELHE ao redigir pra esse contato — chame a pessoa pelos vocativos de como_chamo (como o dono a chama), e module intimidade pelo como_me_chama/girias/registro dela (soma ao voice guide global).",
     inputSchema: {
       type: "object",
       properties: {
@@ -963,7 +1222,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "send",
-    description: "Envia mensagem (texto ou midia) pra contato/grupo. FLUXO OBRIGATORIO: 1a chamada SEM confirmed (mostra destinatario+conteudo e bloqueia); 2a com confirmed:true apos o usuario confirmar. 'to' aceita nome/telefone/chat_id.",
+    description: "Envia mensagem (texto ou midia) pra contato/grupo. FLUXO OBRIGATORIO: 1a chamada SEM confirmed (mostra destinatario+conteudo e bloqueia); 2a com confirmed:true apos o usuario confirmar. 'to' aceita nome/telefone/chat_id. Antes de redigir, leia o chat (read): se houver voice_profile, chame a pessoa pelo vocativo de como_chamo e espelhe as girias/registro dela.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1105,13 +1364,15 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "annotate_chat",
-    description: "Salva observacoes e/ou links sobre um contato/grupo (aparecem em read e inbox). Passe so o campo que quer atualizar.",
+    description: "Salva observacoes, links e/ou voice_profile de um contato/grupo (aparecem no read). Passe so o campo que quer atualizar. ATENCAO: observations e links SUBSTITUEM o valor inteiro; voice_profile faz MERGE RASO por chave de topo (atualizar girias preserva como_me_chama/como_chamo; arrays substituem; chave null remove; voice_profile:null limpa tudo). Ao notar vocativo ou giria nova numa conversa, atualize o voice_profile com fonte:'incremental'.",
     inputSchema: {
       type: "object",
       properties: {
         chat: { type: "string", description: "Nome, telefone ou chat_id" },
-        observations: { type: "string", description: "Texto livre com contexto do contato" },
+        observations: { type: "string", description: "Texto livre com contexto do contato (substitui o valor atual inteiro)" },
         links: { type: "array", items: { type: "object", properties: { label: { type: "string" }, url: { type: "string" } }, required: ["label", "url"] }, description: "Links relevantes ({label, url})" },
+        voice_profile: { type: "object", description: "Perfil de voz do contato: { como_me_chama: string[] (vocativos que a pessoa usa com o dono), como_chamo: string[] (vocativos que o dono usa com ela — extrair SO de mensagem autentica do dono, nunca de msg de agente), girias: string[], registro: string (1 linha), exemplos: string[] (2-3 citacoes <=80 chars), confianca: 'alta'|'media'|'baixa', fonte: 'backfill'|'manual'|'incremental' }. Merge raso — mande so as chaves que mudam. analisado_em e carimbado automaticamente.", additionalProperties: true },
+        brain_contact_id: { type: "string", description: "Id do contato no vault Expert Brain (expert-contacts) pra vinculo nativo chat<->contato. null desvincula. So vincule id verificado (get_contact_by_phone), nunca chute." },
         instance: { type: "string", description: "Instancia (alias ou instance_id)" },
       },
       required: ["chat"],
@@ -1159,7 +1420,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "zapi_action",
-    description: "Executa qualquer acao avancada da Z-API (operacoes infrequentes nao cobertas pelas tools). Actions de envio (send-poll, forward, edit-message) exigem confirmed:true.",
+    description: "Executa acao avancada do provider WhatsApp (Z-API ou Evolution; operacoes infrequentes nao cobertas pelas tools). Actions de envio (send-poll, forward, edit-message) exigem confirmed:true. Nota: forward so existe na Z-API.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1183,10 +1444,16 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "check_message",
-    description: "Verifica se um texto viola alguma regra hard do voice guide (tu/teu, em-dash, hype, saudacoes genericas, validacao afetiva, etc). Warning, nao bloqueio — use antes de send pra revisar drafts.",
+    description: "Verifica um draft contra o voice guide: regras hard (universais + pessoais do banco), sinais estruturais anti-uniformidade (msg-monolito, reticencias uniformes, cadeia de setas, caixa 100% minuscula, burst inflado) e score 0-10 (abaixo de 7 = regenerar). Warning, nao bloqueio — use antes de send pra revisar drafts. Aceita string ou array de strings (burst).",
     inputSchema: {
       type: "object",
-      properties: { content: { type: "string", description: "Texto a verificar" } },
+      properties: {
+        content: {
+          description: "Texto a verificar — string unica ou array de strings (burst de sends)",
+          anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+        },
+        instance: { type: "string", description: "Instancia (opcional) — usa a calibracao pessoal dela se houver" },
+      },
       required: ["content"],
       additionalProperties: false,
     },
@@ -1197,6 +1464,31 @@ const TOOL_SCHEMAS = [
     inputSchema: {
       type: "object",
       properties: { instance: { type: "string", description: "Instancia (alias ou instance_id)" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "check_delivery",
+    description: "Verifica status de entrega (pending/sent/delivered/read) de mensagens enviadas pelo agente. Use apos send pra primeiro contato ou quando suspeitar que mensagens nao estao chegando (chat fantasma do 9o digito). Mensagem presa em sent/pending ha 2+ min = alerta.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "UUID da mensagem (retornado pelo send)" },
+        chat: { type: "string", description: "Alternativa: nome, telefone ou chat_id — verifica as ultimas mensagens do agente nesse chat" },
+        limit: { type: "number", description: "Quantas mensagens verificar quando usar chat (default 10, max 50)" },
+        instance: { type: "string", description: "Instancia (alias ou instance_id)" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "merge_ghost_chats",
+    description: "Encontra e funde pares de chats duplicados pelo 9o digito (real + fantasma) na mesma instancia: move mensagens/categorias pro chat real e apaga o fantasma. dry_run=true (default) so lista os pares sem alterar nada.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: { type: "boolean", description: "true (default) = so lista; false = executa o merge" },
+      },
       additionalProperties: false,
     },
   },

@@ -445,6 +445,16 @@ export class EvolutionProvider implements WaProvider {
           body: JSON.stringify({ where: {} }),
         };
 
+      case "phone-exists":
+        // chat/whatsappNumbers devolve [{exists, jid, number}] — consumidor
+        // (canonicalizePhone no mcp-api) parseia phone|number|jid tolerante
+        return {
+          url: this.u(creds, "chat/whatsappNumbers"),
+          method: "POST",
+          headers,
+          body: JSON.stringify({ numbers: [String(params.phone ?? "")] }),
+        };
+
       // Evolution v2 não tem endpoint de forward (confirmado na collection v2.3)
       case "forward":
       default:

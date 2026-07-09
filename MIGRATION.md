@@ -25,7 +25,7 @@ Com `WEBHOOK_REQUIRE_AUTH=true` (recomendado), webhooks de instâncias não regi
    git pull
    ```
 
-2. **Aplique a migration `0031_provider_neutralization`:**
+2. **Aplique a migration `0040_provider_neutralization`:**
    ```bash
    supabase db push
    ```

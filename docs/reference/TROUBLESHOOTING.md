@@ -2,7 +2,7 @@
 
 Problemas comuns em produção: **sintoma → causa provável → como verificar → como resolver**. Complementa os runbooks de incidente do [SECURITY.md](../../SECURITY.md) (vazamento de chave, loop de envio, webhook hostil) — aqui o foco é o funcional do dia a dia.
 
-> As queries SQL rodam com a `service_role` (Supabase Studio → SQL Editor, ou `psql`). Os exemplos usam nomes de tabela atuais (pós-0031).
+> As queries SQL rodam com a `service_role` (Supabase Studio → SQL Editor, ou `psql`). Os exemplos usam nomes de tabela atuais (pós-0040).
 
 ---
 

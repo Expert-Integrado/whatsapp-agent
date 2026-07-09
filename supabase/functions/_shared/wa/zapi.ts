@@ -390,6 +390,16 @@ export class ZapiProvider implements WaProvider {
       };
     }
 
+    // phone-exists → GET /phone-exists/{phone} — numero canonico + lid (9o digito)
+    if (action === "phone-exists") {
+      const phone = encodeURIComponent(String(p.phone ?? ""));
+      return {
+        url: `${base}/phone-exists/${phone}`,
+        method: "GET",
+        headers,
+      };
+    }
+
     // Read-only Z-API endpoints are GET with no body (POST returns 405)
     const GET_ACTIONS = new Set<WaAction>(["status", "chats", "contacts"]);
     if (GET_ACTIONS.has(action)) {
@@ -499,7 +509,12 @@ function zapiHandleReceived(p: Record<string, unknown>): InboundEvent[] {
     messageType: messageType as import("./types.ts").MsgType,
     content,
     caption,
-    quotedProviderId: ((p.referencedMessage as Record<string, unknown> | undefined)?.messageId as string | null) ?? null,
+    // Z-API manda a referência do reply como referenceMessageId (string no topo);
+    // o shape antigo referencedMessage.messageId nunca apareceu em prod (1,19M
+    // msgs, 0 hits — verificado 09/07/2026), fica como fallback defensivo.
+    quotedProviderId: (p.referenceMessageId as string | undefined)
+      ?? ((p.referencedMessage as Record<string, unknown> | undefined)?.messageId as string | null)
+      ?? null,
     isForwarded: !!p.forwarded,
     timestamp: ts,
     media,

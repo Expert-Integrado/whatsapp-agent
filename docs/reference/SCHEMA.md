@@ -1,6 +1,6 @@
 # Esquema do banco (Postgres / Supabase)
 
-Referência do banco do WhatsApp Agent: tabelas, views, functions, triggers, cron jobs, RLS, Storage e a linha do tempo das migrations. **Fonte de verdade:** os arquivos em [`supabase/migrations/`](../../supabase/migrations/). Este documento descreve o **estado atual** (após a migration 0031) e anota a migration que introduziu cada coisa.
+Referência do banco do WhatsApp Agent: tabelas, views, functions, triggers, cron jobs, RLS, Storage e a linha do tempo das migrations. **Fonte de verdade:** os arquivos em [`supabase/migrations/`](../../supabase/migrations/). Este documento descreve o **estado atual** (após a migration 0040) e anota a migration que introduziu cada coisa.
 
 > **Convenção multi-instância (desde 0027/0028):** quase toda tabela de dados carrega `instance_id` e usa **chave composta** `(instance_id, …)`. Isso permite que o dono tenha mais de um número de WhatsApp (ex.: pessoal + profissional) no mesmo banco, inclusive falando entre si. `instance_id` é FK para `wa_instance.instance_id`.
 
@@ -69,7 +69,7 @@ Tabelas sem aresta direta no diagrama por serem logs/auxiliares: `webhook_events
 ## Tabelas
 
 ### `wa_instance` — instâncias de WhatsApp
-Origem: [0001](../../supabase/migrations/0001_schema_core.sql) (como `zapi_instance`); colunas adicionais em [0027](../../supabase/migrations/0027_multi_instance_additive.sql), [0029](../../supabase/migrations/0029_per_instance_webhook_token.sql); renomeada para `wa_instance` + `provider`/`base_url` em [0031](../../supabase/migrations/0031_provider_neutralization.sql).
+Origem: [0001](../../supabase/migrations/0001_schema_core.sql) (como `zapi_instance`); colunas adicionais em [0027](../../supabase/migrations/0027_multi_instance_additive.sql), [0029](../../supabase/migrations/0029_per_instance_webhook_token.sql); renomeada para `wa_instance` + `provider`/`base_url` em [0040](../../supabase/migrations/0040_provider_neutralization.sql).
 
 Uma linha por número de WhatsApp conectado. É a tabela que decide **qual provedor** e **quais credenciais** usar.
 
@@ -78,8 +78,8 @@ Uma linha por número de WhatsApp conectado. É a tabela que decide **qual prove
 | `id` | UUID PK | Identificador interno |
 | `instance_id` | TEXT UNIQUE | ID da instância — usado como FK em todas as tabelas de dados |
 | `provider` | TEXT | `zapi` ou `evolution` (CHECK `wa_instance_provider_check`). Default `zapi` |
-| `auth_token` | TEXT | Token de autenticação (era `token` até a 0031) |
-| `client_token` | TEXT (nullable) | Client-Token da Z-API. Nullable desde 0031 (Evolution não usa) |
+| `auth_token` | TEXT | Token de autenticação (era `token` até a 0040) |
+| `client_token` | TEXT (nullable) | Client-Token da Z-API. Nullable desde 0040 (Evolution não usa) |
 | `base_url` | TEXT | Base URL do servidor (customização Evolution) |
 | `webhook_url` | TEXT | URL do webhook configurada no provedor |
 | `webhook_token` | TEXT | Senha do webhook **por instância** (header `z-api-token`), aprendida via TOFU pelo `process-webhook` (0029) |
@@ -170,7 +170,7 @@ Origem: [0016](../../supabase/migrations/0016_lid_mapping.sql); PK composta em [
 Origem: [0001](../../supabase/migrations/0001_schema_core.sql); `was_waiting` em [0017](../../supabase/migrations/0017_waiting_message_tracking.sql). Toda requisição de webhook é gravada aqui antes do processamento. Campos: `event_type`, `payload` (JSONB), `processed`, `error`, `was_waiting` (webhook chegou sem decriptar — E2E pendente), `received_at`, `processed_at`. Índices: `idx_webhook_raw_received`, `idx_webhook_raw_unprocessed` (parcial), `idx_webhook_raw_was_waiting` (parcial). Limpeza: cron remove processados > 7 dias.
 
 ### `wa_action_log` — auditoria de ações via MCP (particionada)
-Origem: [0018](../../supabase/migrations/0018_zapi_action_log.sql) (como `zapi_action_log`); renomeada em [0031](../../supabase/migrations/0031_provider_neutralization.sql). **PK:** `(id, called_at)`, **particionada por RANGE(`called_at`)** (mensal). Registra cada chamada de ação: `agent_request_id` (idempotência 24h), `action`, `category` (`read`/`write`/`destructive`/`rejected`), `params`, `method`, `instance_id` (nullable — fallback de auditoria), `result_status`, `result_body`, `error`, `agent_name`, `duration_ms`. **Retenção:** 90 dias (DROP automático de partições). As partições filhas mantêm o prefixo `zapi_action_log_YYYY_MM` (a 0031 não as renomeia — são internas).
+Origem: [0018](../../supabase/migrations/0018_zapi_action_log.sql) (como `zapi_action_log`); renomeada em [0040](../../supabase/migrations/0040_provider_neutralization.sql). **PK:** `(id, called_at)`, **particionada por RANGE(`called_at`)** (mensal). Registra cada chamada de ação: `agent_request_id` (idempotência 24h), `action`, `category` (`read`/`write`/`destructive`/`rejected`), `params`, `method`, `instance_id` (nullable — fallback de auditoria), `result_status`, `result_body`, `error`, `agent_name`, `duration_ms`. **Retenção:** 90 dias (DROP automático de partições). As partições filhas mantêm o prefixo `zapi_action_log_YYYY_MM` (a 0040 não as renomeia — são internas).
 
 ### `voice_guide` — guia de voz do dono
 Origem: [0030](../../supabase/migrations/0030_voice_guide.sql). Markdown que descreve como o dono se comunica, consumido pela `mcp-api`. Single-tenant: uma linha global (`instance_id` NULL) ou uma por instância. UNIQUE em `COALESCE(instance_id,'__global__')`.
@@ -189,8 +189,8 @@ Origem: [0030](../../supabase/migrations/0030_voice_guide.sql). Markdown que des
 | `v_messages_with_sender` | 0003, recriada 0026/0028 | `messages.*` + `sender_contact_name`, `chat_display_name`, `chat_is_group` (JOIN com `chats`). Usada pelo comando `read` |
 | `v_chats_with_categories` | 0011, recriada 0028 | Por chat: arrays `category_slugs[]` e `category_labels[]`. Permite filtro `WHERE category_slugs && ARRAY['cliente','prospect']` |
 | `v_waiting_messages_status` | 0017 | Webhooks `waitingMessage`: `resolved` (follow-up chegou) / `pending` (<24h) / `lost` (>24h sem follow-up) |
-| `zapi_instance` *(shim)* | 0031 | Compat: alias de `wa_instance` que reexpõe `auth_token` como `token`. **Deprecada** |
-| `zapi_action_log` *(shim)* | 0031 | Compat: `SELECT * FROM wa_action_log`. **Deprecada** |
+| `zapi_instance` *(shim)* | 0040 | Compat: alias de `wa_instance` que reexpõe `auth_token` como `token`. **Deprecada** |
+| `zapi_action_log` *(shim)* | 0040 | Compat: `SELECT * FROM wa_action_log`. **Deprecada** |
 
 ---
 
@@ -201,8 +201,8 @@ Origem: [0030](../../supabase/migrations/0030_voice_guide.sql). Markdown que des
 | `set_updated_at()` | 0001 | Trigger genérico: `NEW.updated_at = now()`. Usada por `wa_instance` e `chats` |
 | `call_edge_function(path TEXT)` | 0001 | **Ponte Postgres → Edge Function.** `SECURITY DEFINER`. Lê `project_url` + `service_role_key` do **Supabase Vault** em runtime e faz `net.http_post`. Se o Vault não estiver populado, apenas emite `NOTICE` e retorna NULL (não quebra cron/trigger). Usada por todos os cron jobs e pelo trigger de transcrição |
 | `trigger_transcribe_on_media_done()` | 0014, recriada 0028 | Trigger em `message_media`: quando `download_status` vira `done` e a mensagem é `ptt`/`audio` **privada** sem `content`, chama `/functions/v1/transcribe-queue?id=<message_id>` (transcrição imediata, ~3–5 s) |
-| `create_zapi_action_log_partition_next_month()` | 0018, corrigida 0031 | Cria a partição do mês seguinte de `wa_action_log` |
-| `drop_zapi_action_log_partitions_older_than_90d()` | 0018, corrigida 0031 | Dropa partições de `wa_action_log` com upper bound > 90 dias |
+| `create_zapi_action_log_partition_next_month()` | 0018, corrigida 0040 | Cria a partição do mês seguinte de `wa_action_log` |
+| `drop_zapi_action_log_partitions_older_than_90d()` | 0018, corrigida 0040 | Dropa partições de `wa_action_log` com upper bound > 90 dias |
 
 ---
 
@@ -283,7 +283,17 @@ Todos rodam em **UTC**. Os que chamam Edge Functions usam `call_edge_function` +
 | 0028 | `multi_instance_composite_keys` | Backfill + PKs/UNIQUEs compostas `(instance_id, …)`; recria trigger e views |
 | 0029 | `per_instance_webhook_token` | `webhook_token` por instância; UNIQUE `(instance_id, provider_msg_id)` |
 | 0030 | `voice_guide` | Tabela `voice_guide` |
-| 0031 | `provider_neutralization` | Rename `zapi_*`→`wa_*`, `token`→`auth_token`; `provider`/`base_url`; views shim de compat |
+| 0031 | `merge_ninth_digit_ghosts` | Função `merge_ninth_digit_ghosts` (funde chats fantasmas do 9º dígito BR) |
+| 0032 | `voice_checks` | Coluna `checks` na `voice_guide` (calibração pessoal do voice check) |
+| 0033 | `nurture_state` | Cursor da rotina de nutrição de contatos |
+| 0034 | `nurture_backfill` | Controle do backfill de nutrição |
+| 0035 | `chat_voice_profile` | `chats.voice_profile` JSONB (perfil de voz por contato) |
+| 0035 | `social_graph_state` | *(duplicada pelo squash do PR #5 — reaplicada como 0039)* |
+| 0036 | `chat_brain_contact` | `chats.brain_contact_id` (vínculo com o Expert Brain) |
+| 0037 | `sent_by_agent_from_api` | `sent_by_agent` a partir do `fromApi` do webhook |
+| 0038 | `voice_profile_como_chamo` | `voice_profile.como_chamo` |
+| 0039 | `social_graph_state` | Cursor do grafo social de interações |
+| 0040 | `provider_neutralization` | Rename `zapi_*`→`wa_*`, `token`→`auth_token`; `provider`/`base_url`; views shim de compat |
 
 ---
 

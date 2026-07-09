@@ -340,6 +340,20 @@ Deno.test("zapi.buildAction get-contact-info vira GET /contacts/{phone}", () => 
   assertEquals(r!.body, undefined);
 });
 
+Deno.test("zapi.buildAction phone-exists vira GET /phone-exists/{phone}", () => {
+  const r = z.buildAction(creds, "phone-exists", { phone: "5581992030166" });
+  assertEquals(r!.method, "GET");
+  assertEquals(r!.url.endsWith("/phone-exists/5581992030166"), true);
+  assertEquals(r!.body, undefined);
+});
+
+Deno.test("zapi.buildAction contacts usa GET sem body", () => {
+  const r = z.buildAction(creds, "contacts", {});
+  assertEquals(r!.method, "GET");
+  assertEquals(r!.url.endsWith("/contacts"), true);
+  assertEquals(r!.body, undefined);
+});
+
 Deno.test("zapi.buildAction status usa GET sem body (RED: atualmente retorna POST)", () => {
   const r = z.buildAction(creds, "status", {});
   assertEquals(r!.method, "GET");

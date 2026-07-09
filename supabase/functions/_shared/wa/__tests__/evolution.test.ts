@@ -609,6 +609,14 @@ Deno.test("evo.buildAction send-poll aceita values como strings", () => {
   assertEquals(JSON.parse(r!.body!).selectableCount, 1);
 });
 
+Deno.test("evo.buildAction phone-exists → POST chat/whatsappNumbers", () => {
+  const r = e.buildAction(creds, "phone-exists", { phone: "5581992030166" });
+  assertEquals(r !== null, true);
+  assertEquals(r!.url.endsWith("/chat/whatsappNumbers/you_casa"), true);
+  assertEquals(r!.method, "POST");
+  assertEquals(JSON.parse(r!.body!), { numbers: ["5581992030166"] });
+});
+
 Deno.test("evo.buildAction contacts → POST chat/findContacts", () => {
   const r = e.buildAction(creds, "contacts", {});
   assertEquals(r !== null, true);

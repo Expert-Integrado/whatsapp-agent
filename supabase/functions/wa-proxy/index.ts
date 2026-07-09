@@ -14,7 +14,7 @@
 //   - Timeout 15s na chamada do provider
 //   - Dispatch via getProvider(creds.provider).buildAction (anti-SSRF: allowlist antes do dispatch)
 //
-// Tasks 1-15 done; migration 0031 renomeou: zapi_instance→wa_instance, zapi_action_log→wa_action_log,
+// Tasks 1-15 done; migration 0040 renomeou: zapi_instance→wa_instance, zapi_action_log→wa_action_log,
 // token→auth_token, e adicionou colunas provider/base_url.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -45,6 +45,7 @@ const READ_ACTIONS = new Set([
   "chats",
   "contacts",
   "get-contact-info",  // alias: edge converte pra GET /contacts/{phone}
+  "phone-exists",      // alias: edge converte pra GET /phone-exists/{phone} — devolve numero canonico + lid
 ]);
 
 const WRITE_ACTIONS = new Set([

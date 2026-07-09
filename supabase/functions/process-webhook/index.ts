@@ -36,7 +36,7 @@ const ZAPI_WEBHOOK_TOKEN = Deno.env.get("ZAPI_WEBHOOK_TOKEN") ?? "";
 // realmente envia. Desligar (false) apos identificar o header de auth correto.
 const DEBUG_HEADERS = Deno.env.get("WEBHOOK_DEBUG_HEADERS") === "true";
 
-// Credenciais vêm da tabela wa_instance (migration 0031 renomeou zapi_instance).
+// Credenciais vêm da tabela wa_instance (migration 0040 renomeou zapi_instance).
 
 // Colunas que o orquestrador lê de wa_instance pra montar InstanceCreds + auth.
 const CREDS_COLUMNS =
@@ -217,6 +217,11 @@ async function persistMessage(
     chat_id: chatId,
     direction: ev.fromMe ? "sent" : "received",
     from_me: ev.fromMe,
+    // fromApi=true (Z-API, lido defensivo do raw) = disparo via API que NAO passou
+    // pela edge send-message (ela insere primeiro com sent_by_agent+nome e este
+    // insert vira duplicata 23505). Sem isso, disparo de API direto (zapi_action
+    // etc) ficava logado como "dono". Evolution nao manda o campo → false.
+    sent_by_agent: raw.fromApi === true,
     sender_phone: ev.senderPhone,
     sender_name: ev.senderName,
     message_type: ev.messageType,
