@@ -48,6 +48,9 @@ Categoria: **read** (consulta), **write** (altera metadados no banco), **destruc
 | `react` | write | — | Reage a uma mensagem com emoji (string vazia remove) |
 | `transcribe_audio` | write | — | Força transcrição de áudios pendentes (até 20) → `messages.content` |
 | `sync_groups` | write | — | Sincroniza nomes de grupos via provider (`dry_run` disponível) |
+| `list_scheduled` | read | — | Lista sequências de mensagens agendadas (default: `pending`); traz id, horário BRT, progresso (`items_sent/total`) e erro |
+| `cancel_scheduled` | write | — | Cancela uma sequência agendada ainda `pending` (por id) |
+| `schedule` | destructive | ✅ | Agenda uma **sequência** de 1–10 mensagens (texto/mídia/voz TTS/enquete) pra envio único futuro. Confirmação na **criação**; o disparo (worker `dispatch-scheduled`, cron 1/min) roda sem novo gate |
 | `send` | destructive | ✅ | Envia texto/mídia para contato/grupo |
 | `send_voice` | destructive | ✅ | Gera TTS (ElevenLabs) e envia como PTT |
 | `edit_message` | destructive | ✅ | Edita texto de uma mensagem sua (janela ~15 min) |

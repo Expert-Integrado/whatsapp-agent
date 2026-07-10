@@ -1111,6 +1111,106 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance });
       }
 
+      case "schedule": {
+        // Agendamento de sequencia de mensagens (0047). Valida tudo AQUI na criacao;
+        // o worker dispatch-scheduled so drena a fila e reusa as edges de envio.
+        // Gate confirmed e satisfeito na criacao — o disparo roda confirmed=true.
+        const { to, at, items, instance, agent_name, confirmed = false } = params;
+        const when = new Date(at);
+        if (!at || isNaN(when.getTime())) return json({ error: "Parametro 'at' invalido. Use ISO-8601 COM offset (ex: 2026-07-15T09:30:00-03:00)." }, 400);
+        if (when.getTime() <= Date.now()) return json({ error: `'at' precisa ser futuro. Agora e ${toBRT(new Date().toISOString())}.` }, 400);
+        if (!Array.isArray(items) || items.length < 1 || items.length > 10) return json({ error: "items: array de 1 a 10 itens." }, 400);
+        const SCHED_MEDIA = new Set(["image", "audio", "ptt", "video", "document"]);
+        const SCHED_TYPES = new Set(["text", ...SCHED_MEDIA, "voice", "poll"]);
+        const problems: string[] = [];
+        items.forEach((it: any, i: number) => {
+          if (!it?.type || !SCHED_TYPES.has(it.type)) { problems.push(`item ${i}: type invalido (${it?.type})`); return; }
+          if (it.type === "text" && !it.content) problems.push(`item ${i}: text exige content`);
+          if (SCHED_MEDIA.has(it.type) && !/^https?:\/\//.test(String(it.media_url ?? ""))) problems.push(`item ${i}: ${it.type} exige media_url http(s)`);
+          if (it.type === "voice" && (!it.content || String(it.content).length > 5000)) problems.push(`item ${i}: voice exige content (1-5000 chars)`);
+          if (it.type === "poll" && (!it.question || !Array.isArray(it.options) || it.options.length < 2 || it.options.length > 12)) problems.push(`item ${i}: poll exige question + options (2-12)`);
+          if (it.link && it.type !== "text") problems.push(`item ${i}: link so em type text`);
+          if (it.delay_after !== undefined && (typeof it.delay_after !== "number" || it.delay_after < 0 || it.delay_after > 300)) problems.push(`item ${i}: delay_after 0-300s`);
+        });
+        if (problems.length) return json({ error: "items invalidos", problems }, 400);
+        const resolved = await resolveChat(to, instance);
+        if (resolved.error) return json({ ok: false, error: resolved.error });
+        if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
+        const targetInstance = (instance ? await resolveInstanceKey(instance) : null) ?? resolved.instance_id;
+        if (!targetInstance) return json({ error: "Instancia nao resolvida — chat nao existe no banco; passe 'instance' e um chat_id exato, ou envie o primeiro contato manualmente antes de agendar." }, 400);
+        const signedUrl = items.some((it: any) => String(it.media_url ?? "").includes("/storage/v1/object/sign/"));
+        const warning = signedUrl ? "media_url com signed URL do Storage — provavelmente EXPIRA antes do disparo. Use URL publica." : undefined;
+        const preview = items.map((it: any, i: number) =>
+          `${i + 1}. [${it.type}] ${String(it.content ?? it.question ?? it.media_url ?? "").slice(0, 80)}`);
+        if (!confirmed) return json({
+          blocked: true, needs_confirmation: true, to: resolved.chat_name, instance: targetInstance,
+          scheduled_at: when.toISOString(), scheduled_at_brt: toBRT(when.toISOString()), items: preview,
+          ...(warning && { warning }),
+          instruction: "Mostre destinatario + horario (BRT) + itens ao usuario e so reenvie com confirmed:true apos ele confirmar.",
+        });
+        const { data: ins, error: insErr } = await supabase.from("scheduled_sequences").insert({
+          instance_id: targetInstance, chat_id: resolved.chat_id, chat_name: resolved.chat_name,
+          scheduled_at: when.toISOString(), items, created_by: agent_name || "mcp-api",
+        }).select("id").single();
+        if (insErr) return json({ error: insErr.message }, 500);
+        return json({
+          ok: true, id: ins.id, chat: resolved.chat_name, instance: targetInstance,
+          scheduled_at: when.toISOString(), scheduled_at_brt: toBRT(when.toISOString()),
+          items_total: items.length, ...(warning && { warning }),
+          hint: "Agendado. Use list_scheduled pra acompanhar e cancel_scheduled(id) pra cancelar enquanto pending.",
+        });
+      }
+
+      case "list_scheduled": {
+        const { status = "pending", chat, instance, limit = 20 } = params;
+        let q = supabase.from("scheduled_sequences")
+          .select("id, instance_id, chat_id, chat_name, scheduled_at, status, items, items_sent, error, created_at")
+          .order("scheduled_at", { ascending: true })
+          .limit(Math.min(50, Number(limit) || 20));
+        if (status !== "all") q = q.eq("status", status);
+        if (instance) {
+          const k = await resolveInstanceKey(instance);
+          if (!k) return json({ error: `Instancia "${instance}" nao encontrada.` }, 400);
+          q = q.eq("instance_id", k);
+        }
+        if (chat) {
+          const r = await resolveChat(chat, instance);
+          if (r.error) return json({ error: r.error }, 400);
+          if (r.candidates) return json({ ok: true, ambiguous: true, candidates: r.candidates });
+          q = q.eq("chat_id", r.chat_id);
+        }
+        const { data, error } = await q;
+        if (error) return json({ error: error.message }, 500);
+        return json({
+          ok: true, total: data?.length ?? 0,
+          scheduled: (data ?? []).map((s: any) => ({
+            id: s.id, chat: s.chat_name ?? s.chat_id, instance: s.instance_id,
+            scheduled_at: s.scheduled_at, scheduled_at_brt: toBRT(s.scheduled_at),
+            status: s.status, items_sent: s.items_sent,
+            items_total: Array.isArray(s.items) ? s.items.length : 0,
+            first_item: Array.isArray(s.items) && s.items[0]
+              ? `[${s.items[0].type}] ${String(s.items[0].content ?? s.items[0].question ?? s.items[0].media_url ?? "").slice(0, 60)}` : null,
+            ...(s.error && { error: s.error }),
+          })),
+        });
+      }
+
+      case "cancel_scheduled": {
+        const { id } = params;
+        if (!id) return json({ error: "id obrigatorio (UUID de list_scheduled ou do schedule)." }, 400);
+        // Claim otimista: so cancela se ainda pending (processing/sent/failed nao volta).
+        const { data: rows, error } = await supabase.from("scheduled_sequences")
+          .update({ status: "canceled", finished_at: new Date().toISOString() })
+          .eq("id", id).eq("status", "pending")
+          .select("id, chat_name, scheduled_at");
+        if (error) return json({ error: error.message }, 500);
+        if (!rows?.length) {
+          const { data: cur } = await supabase.from("scheduled_sequences").select("status").eq("id", id).maybeSingle();
+          return json({ ok: false, error: cur ? `Agendamento nao esta pending (status atual: ${cur.status}).` : "Agendamento nao encontrado." }, 400);
+        }
+        return json({ ok: true, canceled: true, id, chat: rows[0].chat_name, scheduled_at_brt: toBRT(rows[0].scheduled_at) });
+      }
+
       case "react": {
         const { message_id, chat, target = "last", emoji, instance } = params;
         let msg: any = null;
@@ -1379,7 +1479,7 @@ function rpc(id: any, payload: Record<string, unknown>): Response {
 const rpcResult = (id: any, result: unknown) => rpc(id, { result });
 const rpcError = (id: any, code: number, message: string) => rpc(id, { error: { code, message } });
 
-const SERVER_INFO = { name: "whatsapp-agent", version: "3.2.0" };
+const SERVER_INFO = { name: "whatsapp-agent", version: "3.4.0" };
 const PROTOCOL_VERSION = "2024-11-05";
 
 // Schemas expostos no tools/list.
@@ -1729,6 +1829,76 @@ const TOOL_SCHEMAS = [
       properties: {
         dry_run: { type: "boolean", description: "true (default) = so lista; false = executa o merge" },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "schedule",
+    description: "Agenda uma SEQUENCIA de mensagens (1-10 itens, enviados em ordem) pra envio futuro UNICO em qualquer chat/instancia. FLUXO OBRIGATORIO: 1a chamada SEM confirmed (retorna resumo; mostre ao usuario); 2a com confirmed:true. No disparo o gate de inbound recente NAO se aplica (ja confirmado aqui). media_url precisa estar acessivel NA HORA DO DISPARO — nao use signed URLs curtas. Item voice gera o TTS (ElevenLabs) na hora do envio. Nao ha edicao: pra mudar, cancel_scheduled + schedule de novo. Precisao: minuto a minuto, nao segundo exato. Sequencias longas de itens curtos podem bater no rate limit por chat/min — use delay_after >= 15 nesses casos.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Destinatario: nome, telefone ou chat_id (o chat precisa existir; primeiro contato nao e suportado no agendamento)" },
+        at: { type: "string", description: "Quando enviar: ISO-8601 COM offset (ex: 2026-07-15T09:30:00-03:00). Precisa ser futuro." },
+        items: {
+          type: "array", minItems: 1, maxItems: 10,
+          description: "Sequencia ordenada de mensagens",
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["text", "image", "audio", "ptt", "video", "document", "voice", "poll"], description: "voice = TTS ElevenLabs gerado no disparo; poll = enquete" },
+              content: { type: "string", description: "Texto, legenda da midia, ou (voice) o texto a virar fala (max 5000)" },
+              media_url: { type: "string", description: "URL PUBLICA da midia (obrigatorio pra image/audio/ptt/video/document); precisa estar valida na hora do disparo" },
+              file_name: { type: "string", description: "Nome do arquivo para type=document" },
+              link: {
+                type: "object", description: "Card de preview de link (so type=text); mesmo shape do send",
+                properties: {
+                  url: { type: "string" }, title: { type: "string" }, description: { type: "string" },
+                  image: { type: "string" }, previewSize: { type: "string", enum: ["SMALL", "MEDIUM", "LARGE"] },
+                },
+              },
+              voice_id: { type: "string", description: "(voice) ElevenLabs voice ID; default: default_voice_id da instancia" },
+              model_id: { type: "string" }, stability: { type: "number" }, similarity_boost: { type: "number" },
+              style: { type: "number" }, speed: { type: "number" },
+              question: { type: "string", description: "(poll) pergunta da enquete" },
+              options: { type: "array", items: { type: "string" }, description: "(poll) 2-12 opcoes" },
+              selectableCount: { type: "number", description: "(poll) quantas opcoes podem ser marcadas (default 1)" },
+              delay_after: { type: "number", description: "Segundos de pausa APOS este item antes do proximo (0-300). Default: humanizado automatico (~1-15s)" },
+            },
+            required: ["type"],
+            additionalProperties: false,
+          },
+        },
+        instance: { type: "string", description: "Instancia (alias ou instance_id); default: herda a do chat" },
+        confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos o usuario confirmar o resumo do agendamento" },
+      },
+      required: ["to", "at", "items"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_scheduled",
+    description: "Lista sequencias de mensagens agendadas. Default: so pending. Traz id (pra cancel_scheduled), horario em BRT, progresso (items_sent/total) e erro se falhou.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["pending", "processing", "sent", "failed", "canceled", "all"], description: "Filtro de status (default pending)" },
+        chat: { type: "string", description: "Filtra por conversa (nome, telefone ou chat_id)" },
+        instance: { type: "string", description: "Filtra por instancia (alias ou instance_id)" },
+        limit: { type: "number", description: "Max de resultados (default 20, max 50)" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cancel_scheduled",
+    description: "Cancela uma sequencia agendada ainda pending (id vem de list_scheduled ou do schedule). Ja em processing/sent/failed nao da pra cancelar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "UUID do agendamento" },
+      },
+      required: ["id"],
       additionalProperties: false,
     },
   },

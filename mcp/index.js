@@ -173,7 +173,7 @@ function err(msg) {
 
 // ─── SERVER ──────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "whatsapp-agent", version: "2.11.1" });
+const server = new McpServer({ name: "whatsapp-agent", version: "2.12.0" });
 
 // Auto-calcula tempo de typing baseado em tipo+content (humanize=true).
 // Heuristica: ~30 chars/seg = velocidade de digitacao confortavel. Cap em 15s (limite Z-API).
@@ -434,6 +434,122 @@ ATENCAO QUOTA: ElevenLabs tem quota mensal. Verificar saldo antes de bursts gran
         confirmed: true, // gate de confirmacao ja passou aqui no MCP; a edge exige o flag
         agent_name: AGENT_NAME,
       });
+      return r.error ? err(r.error) : ok(r);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// ─── 3.6. schedule / list_scheduled / cancel_scheduled ───────────────────────
+// Agendamento de sequencias de mensagens (envio unico futuro). Validacao pesada
+// e insert acontecem na mcp-api (case "schedule"); o worker dispatch-scheduled
+// (cron 1/min) dispara reusando as edges de envio. Gate confirmed satisfeito AQUI
+// na criacao — o disparo roda confirmed=true sem nova confirmacao.
+
+const scheduleItemSchema = z.object({
+  type: z.enum(["text", "image", "audio", "ptt", "video", "document", "voice", "poll"])
+    .describe("voice = TTS ElevenLabs gerado no disparo; poll = enquete"),
+  content: z.string().optional().describe("Texto, legenda da midia, ou (voice) texto a virar fala (max 5000)"),
+  media_url: z.string().url().optional().describe("URL PUBLICA da midia (obrigatorio pra image/audio/ptt/video/document); precisa estar valida NA HORA DO DISPARO — nao use signed URL curta"),
+  file_name: z.string().optional().describe("Nome do arquivo para type=document"),
+  link: z.object({
+    url: z.string().url(),
+    title: z.string().optional(),
+    description: z.string().optional(),
+    image: z.string().optional(),
+    previewSize: z.enum(["SMALL", "MEDIUM", "LARGE"]).optional(),
+  }).optional().describe("Card de preview de link (so type=text); mesmo shape do send"),
+  voice_id: z.string().optional().describe("(voice) ElevenLabs voice ID; default: default_voice_id da instancia"),
+  model_id: z.string().optional(),
+  stability: z.number().min(0).max(1).optional(),
+  similarity_boost: z.number().min(0).max(1).optional(),
+  style: z.number().min(0).max(1).optional(),
+  speed: z.number().min(0.7).max(1.2).optional(),
+  question: z.string().optional().describe("(poll) pergunta da enquete"),
+  options: z.array(z.string()).optional().describe("(poll) 2-12 opcoes"),
+  selectableCount: z.number().int().optional().describe("(poll) quantas opcoes podem ser marcadas (default 1)"),
+  delay_after: z.number().min(0).max(300).optional().describe("Segundos de pausa APOS este item antes do proximo (0-300). Default: humanizado (~1-15s)"),
+});
+
+server.tool(
+  "schedule",
+  `Agenda uma SEQUENCIA de mensagens (1-10 itens, enviados em ordem) pra envio futuro UNICO.
+Use para: "agenda pra amanha 9h uma imagem com legenda + um audio + um texto pro Marcos".
+
+- Tipos por item: text, image, audio, ptt, video, document, voice (TTS gerado no disparo), poll (enquete).
+- Sem recorrencia e sem edicao: pra mudar, cancel_scheduled + schedule de novo.
+- No disparo o gate de inbound recente NAO se aplica (o agendamento ja foi confirmado aqui).
+- Precisao: minuto a minuto (cron 1/min), nao segundo exato.
+- Sequencia longa de itens curtos pode bater no rate limit por chat/min — use delay_after >= 15.
+
+FLUXO OBRIGATORIO (duas chamadas):
+1a chamada — SEM confirmed: o MCP bloqueia e retorna o resumo (destinatario, horario BRT, itens). Mostre ao usuario.
+2a chamada — COM confirmed: true: so apos o usuario confirmar explicitamente.`,
+  {
+    to: z.string().describe("Destinatario: nome, telefone ou chat_id (o chat precisa existir)"),
+    at: z.string().describe("Quando enviar: ISO-8601 COM offset (ex: 2026-07-15T09:30:00-03:00). Precisa ser futuro."),
+    items: z.array(scheduleItemSchema).min(1).max(10).describe("Sequencia ordenada de mensagens"),
+    instance: z.string().optional().describe("Instancia (alias ou instance_id); default: herda a do chat"),
+    confirmed: z.boolean().default(false).describe("OBRIGATORIO true; so apos o usuario confirmar o resumo do agendamento"),
+  },
+  async ({ to, at, items, instance, confirmed }) => {
+    if (!confirmed) {
+      return {
+        content: [{ type: "text", text: [
+          "BLOQUEADO: confirmacao pendente.",
+          "",
+          "Mostre ao usuario:",
+          `  Destinatario : ${to}`,
+          `  Quando       : ${at}`,
+          `  Sequencia    :`,
+          ...items.map((it, i) => `    ${i + 1}. [${it.type}] ${(it.content ?? it.question ?? it.media_url ?? "").slice(0, 80)}`),
+          "",
+          'Apos o usuario confirmar ("sim", "confirma", "pode agendar"), chame novamente com confirmed: true.',
+        ].join("\n") }],
+        isError: true,
+      };
+    }
+    try {
+      const r = await callApi("schedule", { to, at, items, instance, confirmed: true, agent_name: AGENT_NAME });
+      return r.error ? err(r.error) : ok(r);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+server.tool(
+  "list_scheduled",
+  `Lista sequencias de mensagens agendadas (default: so pending).
+Use para: "o que tem agendado?", "aquele envio de amanha ainda ta de pe?".
+Retorna id (pra cancel_scheduled), horario BRT, progresso (items_sent/total) e erro se falhou.`,
+  {
+    status: z.enum(["pending", "processing", "sent", "failed", "canceled", "all"]).default("pending").describe("Filtro de status"),
+    chat: z.string().optional().describe("Filtra por conversa (nome, telefone ou chat_id)"),
+    instance: z.string().optional().describe("Filtra por instancia (alias ou instance_id)"),
+    limit: z.number().int().min(1).max(50).default(20),
+  },
+  async (args) => {
+    try {
+      const r = await callApi("list_scheduled", args);
+      return r.error ? err(r.error) : ok(r);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+server.tool(
+  "cancel_scheduled",
+  `Cancela uma sequencia agendada ainda pending (id vem de list_scheduled ou do schedule).
+Ja em processing/sent/failed nao da pra cancelar.`,
+  {
+    id: z.string().describe("UUID do agendamento"),
+  },
+  async (args) => {
+    try {
+      const r = await callApi("cancel_scheduled", args);
       return r.error ? err(r.error) : ok(r);
     } catch (e) {
       return err(e.message);
