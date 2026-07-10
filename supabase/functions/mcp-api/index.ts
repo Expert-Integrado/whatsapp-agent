@@ -774,7 +774,6 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ok: true, chats: result, total: result.length,
           ...(dormantCutoff && { note: "Chats dormentes (90+ dias parados) ocultos por padrao — use min_idle_days ou include_dormant:true pra ve-los." }),
         });
-        // NOTA: transcricao de audio na last_message ainda nao portada (proximo incremento).
       }
 
       case "search": {
@@ -1276,8 +1275,7 @@ const rpcError = (id: any, code: number, message: string) => rpc(id, { error: { 
 const SERVER_INFO = { name: "whatsapp-agent", version: "3.2.0" };
 const PROTOCOL_VERSION = "2024-11-05";
 
-// Schemas expostos no tools/list — MVP: status, inbox, read.
-// (as 17 actions restantes ja rodam via dispatchAction; entram no tools/list nos proximos passos)
+// Schemas expostos no tools/list.
 const TOOL_SCHEMAS = [
   {
     name: "status",
@@ -1361,13 +1359,13 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "send_voice",
-    description: "Gera audio TTS (ElevenLabs) e envia como mensagem de voz (PTT). FLUXO OBRIGATORIO: 1a chamada SEM confirmed (bloqueia); 2a com confirmed:true apos o usuario confirmar. voice_id vem da skill 'voz'.",
+    description: "Gera audio TTS (ElevenLabs) e envia como mensagem de voz (PTT). FLUXO OBRIGATORIO: 1a chamada SEM confirmed (bloqueia); 2a com confirmed:true apos o usuario confirmar. voice_id e opcional: sem ele usa a voz default da instancia (voz do dono).",
     inputSchema: {
       type: "object",
       properties: {
         to: { type: "string", description: "Destinatario: chat_id ou phone" },
         text: { type: "string", description: "Texto a converter em fala (max 5000)" },
-        voice_id: { type: "string", description: "ElevenLabs voice ID (skill voz fornece)" },
+        voice_id: { type: "string", description: "ElevenLabs voice ID (opcional — default: voz da instancia)" },
         model_id: { type: "string", description: "Modelo ElevenLabs (default eleven_turbo_v2_5)" },
         stability: { type: "number", description: "0-1 (default 0.45)" },
         similarity_boost: { type: "number", description: "0-1 (default 0.75)" },
@@ -1376,7 +1374,7 @@ const TOOL_SCHEMAS = [
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
       },
-      required: ["to", "text", "voice_id"],
+      required: ["to", "text"],
       additionalProperties: false,
     },
   },

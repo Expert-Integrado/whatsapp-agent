@@ -96,7 +96,11 @@ Deno.serve(async (req) => {
   if (!chat_id || typeof chat_id !== "string") return json({ error: "chat_id obrigatorio" }, 400);
   if (!text || typeof text !== "string" || text.length < 1) return json({ error: "text obrigatorio" }, 400);
   if (text.length > 5000) return json({ error: "text > 5000 chars (limite ElevenLabs)" }, 400);
-  if (!voice_id || typeof voice_id !== "string") return json({ error: "voice_id obrigatorio" }, 400);
+  // voice_id agora e OPCIONAL: sem ele, cai no default_voice_id da instancia
+  // (wa_instance.default_voice_id, migration 0046) — resolvido apos carregar a instancia.
+  if (voice_id !== undefined && typeof voice_id !== "string") {
+    return json({ error: "voice_id deve ser string" }, 400);
+  }
   if (!/^opus_48000_(32|64|96|128|192)$/.test(output_format)) {
     return json({ error: "output_format invalido (deve ser opus_48000_XX)" }, 400);
   }
@@ -141,11 +145,18 @@ Deno.serve(async (req) => {
   if (instanceKey !== undefined && (typeof instanceKey !== "string" || !/^[A-Za-z0-9_-]+$/.test(instanceKey))) {
     return json({ error: "instance invalido" }, 400);
   }
-  const instSel = supabase.from("wa_instance").select("provider, instance_id, base_url, auth_token, client_token, alias");
+  const instSel = supabase.from("wa_instance").select("provider, instance_id, base_url, auth_token, client_token, alias, default_voice_id");
   const { data: instanceRow } = (typeof instanceKey === "string" && instanceKey.length > 0)
     ? await instSel.or(`alias.eq.${instanceKey},instance_id.eq.${instanceKey}`).limit(1).maybeSingle()
     : await instSel.eq("is_default", true).maybeSingle();
   if (!instanceRow) return json({ error: "instancia WA nao encontrada" }, 500);
+
+  // Resolve voz: explicita > default da instancia > env DEFAULT_VOICE_ID.
+  const effectiveVoiceId: string | null =
+    (voice_id as string | undefined) ?? instanceRow.default_voice_id ?? Deno.env.get("DEFAULT_VOICE_ID") ?? null;
+  if (!effectiveVoiceId) {
+    return json({ error: "voice_id obrigatorio (instancia sem default_voice_id configurado)" }, 400);
+  }
   const creds: InstanceCreds = {
     provider: instanceRow.provider,
     instance_id: instanceRow.instance_id,
@@ -186,7 +197,7 @@ Deno.serve(async (req) => {
       agent_request_id,
       action: "send-voice",
       category: "destructive",
-      params: { chat_id, voice_id, model_id, stability, similarity_boost, style, speed, output_format, text_length: text.length },
+      params: { chat_id, voice_id: effectiveVoiceId, model_id, stability, similarity_boost, style, speed, output_format, text_length: text.length },
       method: "POST",
       agent_name: sanitizedAgentName,
       instance_id: instance.instance_id,
@@ -209,7 +220,7 @@ Deno.serve(async (req) => {
       sent_by_agent_name: sanitizedAgentName,
       agent_request_id,
       message_ts: new Date().toISOString(),
-      raw_payload: { source: "send-voice", voice_id, text },
+      raw_payload: { source: "send-voice", voice_id: effectiveVoiceId, text },
     })
     .select("id")
     .single();
@@ -232,7 +243,7 @@ Deno.serve(async (req) => {
     };
     const elAbort = AbortSignal.timeout(ELEVENLABS_TIMEOUT_MS);
     const elRes = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voice_id}?output_format=${output_format}`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${effectiveVoiceId}?output_format=${output_format}`,
       {
         method: "POST",
         headers: {

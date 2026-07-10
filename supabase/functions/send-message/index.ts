@@ -105,6 +105,16 @@ Deno.serve(async (req) => {
 
   if (!chat_id || !message_type) return json({ error: "chat_id e message_type sao obrigatorios" }, 400);
 
+  // Validacao de payload ANTES de inserir/chamar o provider: content vazio era a
+  // causa nº1 de envio failed (Z-API 400 "The field 'message' is empty") — a msg
+  // ja tinha virado linha em messages e o erro so aparecia no send_error.
+  if (message_type === "text" && (typeof content !== "string" || content.trim().length === 0)) {
+    return json({ error: "content vazio: envio de texto exige content nao-vazio" }, 400);
+  }
+  if (["image", "document", "video", "audio", "ptt"].includes(message_type) && !media_url) {
+    return json({ error: `media_url obrigatorio para message_type=${message_type}` }, 400);
+  }
+
   // Server-side guard: requer confirmed=true (defense-in-depth do gate do MCP)
   if (REQUIRE_CONFIRMED && confirmed !== true) {
     return json({

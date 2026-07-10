@@ -234,7 +234,26 @@ async function persistMessage(
     raw_payload: ev.raw,
   }).select("id").single();
 
-  if (error?.code === "23505") return; // duplicado (provider_msg_id ja existe)
+  if (error?.code === "23505") {
+    // Duplicado (provider_msg_id ja existe) — tipicamente o ECO de um envio que a
+    // send-message ja inseriu. A linha dela nao tem message_media (send-message nao
+    // baixa midia), e so o eco traz a URL do provider: garante o download aqui,
+    // senao midia enviada pelo agente nunca fica baixavel (download_attachment falha).
+    if (ev.media) {
+      const { data: existing } = await supabase.from("messages").select("id")
+        .eq("instance_id", instanceId)
+        .eq("provider_msg_id", ev.providerMsgId)
+        .maybeSingle();
+      if (existing) {
+        const { data: hasMedia } = await supabase.from("message_media")
+          .select("id").eq("message_id", existing.id).limit(1);
+        if (!hasMedia?.length) {
+          await downloadMediaToStorage(existing.id, instanceId, chatId, ev.providerMsgId, ev.media, creds, provider);
+        }
+      }
+    }
+    return;
+  }
   if (error) throw error;
 
   if (ev.media) {
@@ -243,15 +262,26 @@ async function persistMessage(
 }
 
 // kind:"status" — porta handleStatus (:367-377). ev.status ja mapeado (sent/delivered/read).
+// MONOTONICO: a Z-API entrega callbacks fora de ordem (SENT chegando DEPOIS do
+// RECEIVED, comum em midia) — sobrescrever cego rebaixava 'delivered' pra 'sent'
+// e a mensagem parecia nunca entregue. So promove, nunca rebaixa.
+const STATUS_RANK: Record<string, number> = { pending: 0, sent: 1, delivered: 2, read: 3 };
 async function persistStatus(
   ev: Extract<InboundEvent, { kind: "status" }>,
   instanceId: string,
 ): Promise<void> {
+  const rank = STATUS_RANK[ev.status] ?? 0;
+  const lower = Object.keys(STATUS_RANK).filter((s) => STATUS_RANK[s] < rank);
   for (const id of ev.providerMsgIds) {
-    await supabase.from("messages").update({ send_status: ev.status })
+    let q = supabase.from("messages").update({ send_status: ev.status })
       .eq("instance_id", instanceId)
       .eq("provider_msg_id", id)
       .eq("sent_by_agent", true);
+    // NULL (eco ingerido pelo webhook) tambem conta como "abaixo" de qualquer status.
+    q = lower.length
+      ? q.or(`send_status.is.null,send_status.in.(${lower.join(",")})`)
+      : q.is("send_status", null);
+    await q;
   }
 }
 
