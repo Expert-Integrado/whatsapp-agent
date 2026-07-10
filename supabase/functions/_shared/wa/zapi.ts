@@ -404,6 +404,18 @@ export class ZapiProvider implements WaProvider {
       };
     }
 
+    // get-business-profile → GET /business/profile?phone={phone} — perfil business
+    // de TERCEIRO (description, address, email, websites, categories, businessHours).
+    // Conta nao-business responde vazio/404 — o caller trata. Doc: business/profile.
+    if (action === "get-business-profile") {
+      const phone = encodeURIComponent(String(p.phone ?? ""));
+      return {
+        url: `${base}/business/profile?phone=${phone}`,
+        method: "GET",
+        headers,
+      };
+    }
+
     // Read-only Z-API endpoints are GET with no body (POST returns 405)
     const GET_ACTIONS = new Set<WaAction>(["status", "chats", "contacts"]);
     if (GET_ACTIONS.has(action)) {

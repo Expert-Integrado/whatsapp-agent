@@ -7,7 +7,7 @@ export type MsgType =
 export type SendStatus = "pending" | "sent" | "delivered" | "read" | "failed";
 
 export type WaAction =
-  | "status" | "chats" | "contacts" | "get-contact-info" | "phone-exists"
+  | "status" | "chats" | "contacts" | "get-contact-info" | "phone-exists" | "get-business-profile"
   | "read-chat" | "read-message" | "send-reaction"
   | "send-text" | "send-poll" | "forward"
   | "delete-message" | "block-contact"

@@ -44,8 +44,9 @@ const READ_ACTIONS = new Set([
   "status",
   "chats",
   "contacts",
-  "get-contact-info",  // alias: edge converte pra GET /contacts/{phone}
-  "phone-exists",      // alias: edge converte pra GET /phone-exists/{phone} — devolve numero canonico + lid
+  "get-contact-info",     // alias: edge converte pra GET /contacts/{phone} (inclui 'about' = recado)
+  "phone-exists",         // alias: edge converte pra GET /phone-exists/{phone} — devolve numero canonico + lid
+  "get-business-profile", // GET /business/profile?phone= — descricao/site/categorias de conta business de TERCEIRO (so Z-API)
 ]);
 
 const WRITE_ACTIONS = new Set([

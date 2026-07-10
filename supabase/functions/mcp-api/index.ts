@@ -639,39 +639,37 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const instRows = await loadInstances();
         const labelOf = (id: string) => instRows.find((r: any) => r.instance_id === id)?.alias ?? id;
         const useCategoryView = !!(category_slugs?.length || exclude_categories?.length);
+        // Todos os filtros descem pro SQL (waiting_on e coluna gerada em chats
+        // desde a 0041) — a versao antiga filtrava em memoria sobre uma janela dos
+        // N chats mais recentes e PERDIA chats esperando alem da janela.
+        // min_idle_days compara last_message_at: pra 'me' a ultima msg e a recebida,
+        // pra 'lead' a enviada — last_message_at coincide com o refTs da logica antiga.
+        // Ordenacao "mais parado primeiro" (idle asc) quando min_idle_days ou
+        // waiting_on:me — absorve a antiga skill 'estou-devendo' direto na tool.
+        const idleFirst = min_idle_days != null || waitingFilter === "me";
         let q = supabase.from(useCategoryView ? "v_chats_with_categories" : "v_chats_with_contact")
           .select(useCategoryView
-            ? "instance_id,chat_id,chat_name,is_group,last_message_at,last_received_at,last_sent_at,category_slugs"
-            : "instance_id,chat_id,chat_name,contact_name,is_group,last_message_at,last_received_at,last_sent_at")
-          .order("last_message_at", { ascending: false, nullsFirst: false })
+            ? "instance_id,chat_id,chat_name,is_group,last_message_at,last_received_at,last_sent_at,waiting_on,category_slugs"
+            : "instance_id,chat_id,chat_name,contact_name,is_group,last_message_at,last_received_at,last_sent_at,waiting_on")
+          .order("last_message_at", { ascending: idleFirst, nullsFirst: false })
           .order("chat_id", { ascending: true })
-          .limit(useCategoryView ? Math.max(limit * 5, 100) : limit);
+          .limit(limit);
         q = instEq(q);
         if (since) q = q.gt("last_message_at", since);
         if (exclude_groups) q = q.eq("is_group", false);
+        if (waitingFilter) q = q.eq("waiting_on", waitingFilter);
+        if (min_idle_days != null) q = q.lte("last_message_at", new Date(Date.now() - min_idle_days * 86400000).toISOString());
         if (category_slugs?.length) q = q.overlaps("category_slugs", category_slugs);
+        if (exclude_categories?.length) q = q.not("category_slugs", "ov", `{${exclude_categories.join(",")}}`);
         const { data: rawChats, error } = await q;
         if (error) return json({ error: error.message }, 500);
-        // Anota waiting_on + idle_days (dias parado desde a ultima msg relevante),
-        // filtra e — quando min_idle_days ou waiting_on:me — ordena por mais parado
-        // primeiro. Isso absorve a antiga skill 'estou-devendo' direto na tool.
         const nowMs = Date.now();
-        const annotated = (rawChats || []).map((c: any) => {
-          const recv = c.last_received_at ? new Date(c.last_received_at).getTime() : 0;
-          const sent = c.last_sent_at ? new Date(c.last_sent_at).getTime() : 0;
-          const w = recv > sent ? "me" : (sent > recv ? "lead" : "none");
-          const refTs = w === "me" ? recv : (w === "lead" ? sent : Math.max(recv, sent));
-          return { c, w, idle_days: refTs ? Math.floor((nowMs - refTs) / 86400000) : null };
-        }).filter((x: any) => {
-          if (waitingFilter && x.w !== waitingFilter) return false;
-          if (min_idle_days != null && (x.idle_days ?? -1) < min_idle_days) return false;
-          if (exclude_categories?.length && x.c.category_slugs && x.c.category_slugs.some((s: string) => exclude_categories.includes(s))) return false;
-          return true;
-        });
-        if (min_idle_days != null || waitingFilter === "me") annotated.sort((a: any, b: any) => (b.idle_days ?? -1) - (a.idle_days ?? -1));
         const idleByKey: Record<string, number | null> = {};
-        for (const x of annotated) idleByKey[`${x.c.instance_id}|${x.c.chat_id}`] = x.idle_days;
-        let chats = annotated.slice(0, limit).map((x: any) => x.c);
+        for (const c of (rawChats || []) as any[]) {
+          const refTs = c.last_message_at ? new Date(c.last_message_at).getTime() : 0;
+          idleByKey[ck(c)] = refTs ? Math.floor((nowMs - refTs) / 86400000) : null;
+        }
+        let chats: any[] = rawChats || [];
 
         let contactById: Record<string, any> = {};
         if (useCategoryView && chats.length) {
@@ -698,9 +696,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         for (const m of enrichedList) enrichedByChat[ck(m)] = m;
         const result = chats.map((c: any) => {
           const msg = enrichedByChat[ck(c)];
-          const recv = c.last_received_at ? new Date(c.last_received_at).getTime() : 0;
-          const sent = c.last_sent_at ? new Date(c.last_sent_at).getTime() : 0;
-          const waiting_on = recv > sent ? "me" : (sent > recv ? "lead" : "none");
+          const waiting_on = c.waiting_on;
           const enriched = contactById[ck(c)] || {};
           return {
             chat_id: c.chat_id, instance: c.instance_id, instance_label: labelOf(c.instance_id),
