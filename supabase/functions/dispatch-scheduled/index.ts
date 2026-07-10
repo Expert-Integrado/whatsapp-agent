@@ -74,12 +74,15 @@ async function dispatchItem(seq: Seq, item: any, index: number): Promise<string 
       ...(item.speed !== undefined && { speed: item.speed }),
     });
   } else if (item.type === "poll") {
+    // Shape canonico Z-API {phone, message, poll:[{name}], pollMaxOptions}:
+    // passthrough no adapter Z-API e traduzido pelo adapter Evolution.
     r = await callEdge("wa-proxy", {
       ...common, action: "send-poll", agent_request_id: crypto.randomUUID(),
       params: {
         phone: String(seq.chat_id).replace(/@.*$/, ""),
-        question: item.question, options: item.options,
-        ...(item.selectableCount !== undefined && { selectableCount: item.selectableCount }),
+        message: item.question,
+        poll: (item.options ?? []).map((o: string) => ({ name: o })),
+        ...(item.selectableCount !== undefined && { pollMaxOptions: item.selectableCount }),
       },
     });
   } else {
