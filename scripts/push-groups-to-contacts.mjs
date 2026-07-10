@@ -100,8 +100,9 @@ if (!allowlist?.length) {
 }
 console.log(`Grupos marcados pra sincronizar: ${allowlist.length}`);
 
-// Números do PRÓPRIO dono (instâncias Z-API) ficam fora dos participantes:
+// Números do PRÓPRIO dono (instâncias) ficam fora dos participantes:
 // com o toggle create_members ligado no worker, o dono viraria contato de si mesmo.
+// 0040 renomeou zapi_instance -> wa_instance (view de compat foi removida na limpeza 09/07).
 const instances = await sb('wa_instance?select=phone_connected');
 const ownPhones = new Set(instances.map((i) => i.phone_connected).filter(Boolean));
 
