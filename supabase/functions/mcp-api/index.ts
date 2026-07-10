@@ -402,15 +402,43 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
 
   const toNorm = normalize(to);
   if (!toNorm) return { error: `Nenhum chat encontrado para "${to}"` };
-  const { data: all } = await instEq(supabase.from("v_chats_with_contact")
-    .select("instance_id,chat_id,chat_name,contact_name,is_group,last_message_at"))
-    .order("last_message_at", { ascending: false, nullsFirst: false }).order("chat_id", { ascending: true }).limit(1500);
-  if (!all?.length) return { error: "Tabela de chats vazia" };
-  const scored = all.map((c: any) => {
+  const SELECT_COLS = "instance_id,chat_id,chat_name,contact_name,is_group,last_message_at";
+  const scoreAll = (rows: any[]) => rows.map((c: any) => {
     const { score, kind } = scoreNameMatch(toNorm, c);
     return { ...c, _score: score > 0 ? applyChatBoost(score, c) : 0, _kind: kind };
   }).filter((c: any) => c._score > 0).sort((a: any, b: any) => b._score - a._score || String(a.chat_id).localeCompare(String(b.chat_id)));
+  // Prefiltro SQL por substring (caso comum: nome digitado certo) — nao carrega a
+  // janela de 1500 e acha chats ALEM dela. Fallback pro scan em memoria cobre
+  // typo/acento divergente (ilike nao e accent-insensitive; o scorer normaliza).
+  let scored: any[] = [];
+  const likeSafe = to.replace(/[%_,()"\\]/g, "").trim();
+  if (likeSafe.length >= 2) {
+    const { data: pre } = await instEq(supabase.from("v_chats_with_contact")
+      .select(SELECT_COLS)
+      .or(`chat_name.ilike.%${likeSafe}%,contact_name.ilike.%${likeSafe}%`))
+      .order("last_message_at", { ascending: false, nullsFirst: false }).order("chat_id", { ascending: true }).limit(200);
+    if (pre?.length) scored = scoreAll(pre);
+  }
+  if (!scored.length) {
+    const { data: all } = await instEq(supabase.from("v_chats_with_contact")
+      .select(SELECT_COLS))
+      .order("last_message_at", { ascending: false, nullsFirst: false }).order("chat_id", { ascending: true }).limit(1500);
+    if (!all?.length) return { error: "Tabela de chats vazia" };
+    scored = scoreAll(all);
+  }
   if (!scored.length) return { error: `Nenhum chat encontrado para "${to}"` };
+  // Colapsa duplicata lid/phone do MESMO contato (mesmo nome normalizado, mesma
+  // instancia): o lid e o espelho tecnico — read expande via lid_mapping e envio
+  // vai pro numero. Sem isso a dupla empata o ranking e vira ambiguidade falsa.
+  const dedup = scored.filter((c: any) => {
+    if (!String(c.chat_id).endsWith("@lid")) return true;
+    const cn = normalize(c.chat_name || c.contact_name || "");
+    if (!cn) return true;
+    return !scored.some((o: any) => !String(o.chat_id).endsWith("@lid")
+      && o.instance_id === c.instance_id
+      && normalize(o.chat_name || o.contact_name || "") === cn);
+  });
+  if (dedup.length) scored = dedup;
   if (scored.length === 1) return { chat_id: scored[0].chat_id, chat_name: scored[0].chat_name || scored[0].contact_name, instance_id: scored[0].instance_id };
   const top = scored[0], runner = scored[1];
   const topIsLid = String(top.chat_id || "").includes("@lid"), runnerIsLid = String(runner.chat_id || "").includes("@lid");
@@ -424,6 +452,40 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
   if (top._score >= MIN_CONFIDENT_SCORE && top._score - runner._score >= MIN_WINNING_GAP)
     return { chat_id: top.chat_id, chat_name: top.chat_name || top.contact_name, instance_id: top.instance_id };
   return { candidates: scored.slice(0, 10).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, last_message_at: c.last_message_at, instance: c.instance_id })) };
+}
+
+// ─── resolveTargetMessage: chat + alvo posicional -> mensagem concreta ────────
+// Compartilhado por react / edit_message / delete_message / send(reply_to) /
+// zapi_action(forward): resolve o chat e acha a mensagem alvo em 1 passo, sem
+// exigir um read previo so pra descobrir o message_id.
+// target: last (default) | last_received (ultima DELES) | last_sent (ultima MINHA).
+async function resolveTargetMessage(chat: string, target: string, instance?: string):
+  Promise<{ msg?: any; error?: string; status?: number; candidates?: any[] }> {
+  const resolved = await resolveChat(chat, instance);
+  if (resolved.error) return { error: resolved.error, status: 400 };
+  if (resolved.candidates) return { candidates: resolved.candidates };
+  const chatIdSet = await expandChatIdsViaLidMapping(resolved.chat_id, resolved.instance_id);
+  let q = supabase.from("messages")
+    .select("id,provider_msg_id,chat_id,instance_id,content,message_type,from_me,message_ts")
+    .in("chat_id", chatIdSet)
+    .not("provider_msg_id", "is", null)
+    .not("provider_msg_id", "ilike", "pending-%")
+    .order("message_ts", { ascending: false, nullsFirst: false })
+    .limit(1);
+  if (resolved.instance_id) q = q.eq("instance_id", resolved.instance_id);
+  if (target === "last_received") q = q.eq("from_me", false);
+  else if (target === "last_sent") q = q.eq("from_me", true);
+  const { data, error } = await q;
+  if (error) return { error: error.message, status: 500 };
+  if (!data?.length) return { error: `nenhuma mensagem (${target}) em ${resolved.chat_name ?? resolved.chat_id}`, status: 404 };
+  return { msg: { ...data[0], _chat_name: resolved.chat_name } };
+}
+function messagePreview(msg: any) {
+  return {
+    from_me: msg.from_me, type: msg.message_type,
+    content: typeof msg.content === "string" ? msg.content.slice(0, 160) : null,
+    message_ts_brt: toBRT(msg.message_ts),
+  };
 }
 
 // ─── Canonicalizacao do 9o digito (bug do chat fantasma — ClickUp 86ajby187) ──
@@ -603,24 +665,26 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       case "status": {
         const dayAgo = new Date(Date.now() - 86400000).toISOString();
         const instances = await loadInstances();
-        const perInstance: any[] = [];
-        for (const inst of instances) {
-          let waData: any;
-          try {
-            const { data } = await callEdge("wa-proxy", { action: "status", method: "GET", agent_name: "mcp-api", instance: inst.alias ?? inst.instance_id });
-            waData = data?.result;
-          } catch (e) { waData = { error: String((e as Error)?.message ?? e) }; }
-          const { count: total } = await supabase.from("messages").select("*", { count: "exact", head: true }).eq("instance_id", inst.instance_id);
-          const { count: today } = await supabase.from("messages").select("*", { count: "exact", head: true }).eq("instance_id", inst.instance_id).gte("created_at", dayAgo);
-          perInstance.push({
+        // Instancias em paralelo, e dentro de cada uma provider + contagens tambem.
+        // total_messages usa count estimado (estatistica do planner): a contagem
+        // exata varria o indice inteiro a cada status; a das 24h segue exata (pequena).
+        const perInstance: any[] = await Promise.all(instances.map(async (inst: any) => {
+          const [waData, totalRes, todayRes] = await Promise.all([
+            callEdge("wa-proxy", { action: "status", method: "GET", agent_name: "mcp-api", instance: inst.alias ?? inst.instance_id })
+              .then(({ data }) => data?.result)
+              .catch((e) => ({ error: String((e as Error)?.message ?? e) })),
+            supabase.from("messages").select("*", { count: "estimated", head: true }).eq("instance_id", inst.instance_id),
+            supabase.from("messages").select("*", { count: "exact", head: true }).eq("instance_id", inst.instance_id).gte("created_at", dayAgo),
+          ]);
+          return {
             instance: inst.alias ?? inst.instance_id,
             phone_connected: inst.phone_connected,
             connected: waData?.connected ?? false,
             webhook_active: inst.is_active,
             provider_status: waData,
-            stats: { total_messages: total, messages_last_24h: today },
-          });
-        }
+            stats: { total_messages_approx: totalRes.count, messages_last_24h: todayRes.count },
+          };
+        }));
         return json({ ok: true, transcription_enabled: !!OPENAI_API_KEY, instances: perInstance });
       }
 
@@ -1048,8 +1112,16 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
               return json({ ok: true, blocked: true, reason: "inbound_recente_sem_resposta", chat: resolved.chat_name, ultimo_inbound_ts: lastIn, ultimo_inbound_preview: lastInPrev, hint: "Chame com force_send_after_inbound=true pra prosseguir." });
           }
         }
+        // reply_to posicional: "last" | "last_received" | "last_sent" resolve a msg
+        // citada aqui — sem exigir read previo so pra pegar o id. Sem match, envia
+        // sem reply (mesma semantica de UUID inexistente no send-message).
+        let quotedId: string | null = reply_to ?? null;
+        if (quotedId && ["last", "last_received", "last_sent"].includes(quotedId)) {
+          const r = await resolveTargetMessage(resolved.chat_id, quotedId, targetInstance);
+          quotedId = r.msg?.provider_msg_id ?? null;
+        }
         const sendBody: any = { chat_id: resolved.chat_id, content, message_type: type, confirmed: true, agent_name: agent_name || "mcp-api", instance: targetInstance,
-          ...(media_url && { media_url }), ...(file_name && { file_name }), ...(reply_to && { quoted_msg_id: reply_to }),
+          ...(media_url && { media_url }), ...(file_name && { file_name }), ...(quotedId && { quoted_msg_id: quotedId }),
           ...(effectiveDelayTyping !== undefined && { delay_typing: effectiveDelayTyping }), ...(delay_message !== undefined && { delay_message }),
           ...(mentions?.length && { mentions }), ...(mentions_everyone && { mentions_everyone: true }) };
         const { status, data } = await callEdge("send-message", sendBody);
@@ -1082,26 +1154,10 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           if (error || !data) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
           msg = data;
         } else if (chat) {
-          // Atalho posicional: resolve o chat e reage na ultima mensagem em UMA
-          // chamada — sem exigir um read inteiro so pra descobrir o message_id.
-          const resolved = await resolveChat(chat, instance);
-          if (resolved.error) return json({ ok: false, error: resolved.error });
-          if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
-          const chatIdSet = await expandChatIdsViaLidMapping(resolved.chat_id, resolved.instance_id);
-          let q = supabase.from("messages")
-            .select("provider_msg_id,chat_id,instance_id,content,message_type,from_me,message_ts")
-            .in("chat_id", chatIdSet)
-            .not("provider_msg_id", "is", null)
-            .not("provider_msg_id", "ilike", "pending-%")
-            .order("message_ts", { ascending: false, nullsFirst: false })
-            .limit(1);
-          if (resolved.instance_id) q = q.eq("instance_id", resolved.instance_id);
-          if (target === "last_received") q = q.eq("from_me", false);
-          else if (target === "last_sent") q = q.eq("from_me", true);
-          const { data, error } = await q;
-          if (error) return json({ error: error.message }, 500);
-          if (!data?.length) return json({ error: `nenhuma mensagem reagivel (${target}) em ${resolved.chat_name ?? resolved.chat_id}` }, 404);
-          msg = data[0];
+          const r = await resolveTargetMessage(chat, target, instance);
+          if (r.error) return json({ ok: false, error: r.error }, r.status ?? 400);
+          if (r.candidates) return json({ ok: true, ambiguous: true, candidates: r.candidates });
+          msg = r.msg;
         } else {
           return json({ error: "Forneca message_id OU chat (com target opcional)." }, 400);
         }
@@ -1109,45 +1165,80 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const { status, data } = await callEdge("wa-proxy", { action: "send-reaction", params: { phone, messageId: msg.provider_msg_id, reaction: emoji }, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         // Preview da mensagem alvo: confirma que reagiu na certa sem precisar de read.
-        return json({ ok: true, reacted: true, emoji, target_message: {
-          from_me: msg.from_me, type: msg.message_type,
-          content: typeof msg.content === "string" ? msg.content.slice(0, 160) : null,
-          message_ts_brt: toBRT(msg.message_ts),
-        }, result: data?.result });
+        return json({ ok: true, reacted: true, emoji, target_message: messagePreview(msg), result: data?.result });
       }
 
       case "edit_message": {
-        const { message_id, new_content, confirmed = false } = params;
-        if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id, new_content, instruction: "Mostre a mensagem e o novo texto ao usuario; reenvie com confirmed:true apos ele confirmar." });
-        const { data: msg, error } = await supabase.from("messages").select("provider_msg_id,chat_id,from_me,message_ts,message_type,instance_id").eq("id", message_id).single();
-        if (error || !msg) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
+        const { message_id, chat, target = "last_sent", new_content, instance, confirmed = false } = params;
+        // Resolve o alvo ANTES do gate de confirmacao: o blocked devolve o preview
+        // + message_id concreto, e o reenvio confirmado usa o message_id (nunca
+        // re-resolve posicional — msg nova no meio mudaria o alvo).
+        let msg: any;
+        if (message_id) {
+          const { data, error } = await supabase.from("messages").select("id,provider_msg_id,chat_id,from_me,message_ts,message_type,content,instance_id").eq("id", message_id).single();
+          if (error || !data) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
+          msg = data;
+        } else if (chat) {
+          const r = await resolveTargetMessage(chat, target, instance);
+          if (r.error) return json({ ok: false, error: r.error }, r.status ?? 400);
+          if (r.candidates) return json({ ok: true, ambiguous: true, candidates: r.candidates });
+          msg = r.msg;
+        } else {
+          return json({ error: "Forneca message_id OU chat (com target opcional)." }, 400);
+        }
         if (!msg.from_me) return json({ error: "Nao da pra editar msg de outros." }, 400);
         if (msg.message_type && msg.message_type !== "text" && msg.message_type !== "chat") return json({ error: `So texto. Tipo: ${msg.message_type}.` }, 400);
         const ageMs = Date.now() - (msg.message_ts ? new Date(msg.message_ts).getTime() : 0);
         if (ageMs > 15 * 60 * 1000) return json({ error: `Janela de 15min expirada. Use delete + send.` }, 400);
+        if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id: msg.id, target_message: messagePreview(msg), new_content, instruction: "Mostre a mensagem e o novo texto ao usuario; reenvie com confirmed:true e ESTE message_id apos ele confirmar." });
         const phone = String(msg.chat_id).replace(/@.*$/, "");
         const { status, data } = await callEdge("wa-proxy", { action: "send-text", params: { phone, message: new_content, editMessageId: msg.provider_msg_id }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
-        await supabase.from("messages").update({ content: new_content, is_edited: true }).eq("id", message_id);
-        return json({ ok: true, edited: true, message_id, new_content });
+        await supabase.from("messages").update({ content: new_content, is_edited: true }).eq("id", msg.id);
+        return json({ ok: true, edited: true, message_id: msg.id, new_content });
       }
 
       case "delete_message": {
-        const { message_id, confirmed = false } = params;
-        if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id, instruction: "Confirme com o usuario antes de apagar; reenvie com confirmed:true." });
-        const { data: msg, error } = await supabase.from("messages").select("provider_msg_id,chat_id,from_me,instance_id").eq("id", message_id).single();
-        if (error || !msg) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
+        const { message_id, chat, target = "last_sent", instance, confirmed = false } = params;
+        let msg: any;
+        if (message_id) {
+          const { data, error } = await supabase.from("messages").select("id,provider_msg_id,chat_id,from_me,message_ts,message_type,content,instance_id").eq("id", message_id).single();
+          if (error || !data) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
+          msg = data;
+        } else if (chat) {
+          const r = await resolveTargetMessage(chat, target, instance);
+          if (r.error) return json({ ok: false, error: r.error }, r.status ?? 400);
+          if (r.candidates) return json({ ok: true, ambiguous: true, candidates: r.candidates });
+          msg = r.msg;
+        } else {
+          return json({ error: "Forneca message_id OU chat (com target opcional)." }, 400);
+        }
+        if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id: msg.id, target_message: messagePreview(msg), instruction: "Confirme com o usuario antes de apagar; reenvie com confirmed:true e ESTE message_id." });
         const phone = String(msg.chat_id).replace(/@.*$/, "");
         const { status, data } = await callEdge("wa-proxy", { action: "delete-message", params: { phone, messageId: msg.provider_msg_id, owner: !!msg.from_me }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
-        await supabase.from("messages").update({ is_deleted: true }).eq("id", message_id);
-        return json({ ok: true, deleted: true, message_id });
+        await supabase.from("messages").update({ is_deleted: true }).eq("id", msg.id);
+        return json({ ok: true, deleted: true, message_id: msg.id });
       }
 
       case "zapi_action": {
         const ZAPI_SEND_ACTIONS = new Set(["send-poll", "forward-message", "forward", "edit-message", "send-text", "send-message"]);
         const { action: zaction, params: zparams = {}, confirmed = false, instance } = params;
+        // forward posicional: from_chat (+target) resolve messageId/messagePhone aqui.
+        // Antes o forward era inviavel na pratica: exigia o provider_msg_id, que o
+        // read nem devolve. Resolucao ANTES do gate — o blocked ecoa os params
+        // concretos e o reenvio confirmado usa messageId direto (sem re-resolver).
+        if ((zaction === "forward" || zaction === "forward-message") && !zparams.messageId && zparams.from_chat) {
+          const r = await resolveTargetMessage(zparams.from_chat, zparams.target ?? "last", instance);
+          if (r.error) return json({ ok: false, error: r.error }, r.status ?? 400);
+          if (r.candidates) return json({ ok: true, ambiguous: true, candidates: r.candidates });
+          zparams.messageId = r.msg.provider_msg_id;
+          zparams.messagePhone = String(r.msg.chat_id).replace(/@.*$/, "");
+          zparams._target_message = messagePreview(r.msg);
+          delete zparams.from_chat; delete zparams.target;
+        }
         if (ZAPI_SEND_ACTIONS.has(zaction) && !confirmed) return json({ blocked: true, needs_confirmation: true, action: zaction, params: zparams, instruction: `A action "${zaction}" envia conteudo. Mostre ao usuario e reenvie com confirmed:true apos confirmacao.` });
+        delete zparams._target_message;
         const { status, data } = await callEdge("wa-proxy", { action: zaction, params: zparams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}`, detail: data }, status);
         return json({ ok: true, action: zaction, result: data?.result });
@@ -1393,7 +1484,7 @@ const TOOL_SCHEMAS = [
         type: { type: "string", enum: ["text", "image", "audio", "ptt", "video", "document"], description: "Tipo (default text)" },
         media_url: { type: "string", description: "URL publica da midia (obrigatorio se type != text)" },
         file_name: { type: "string", description: "Nome do arquivo para type=document" },
-        reply_to: { type: "string", description: "UUID da mensagem para responder (quote)" },
+        reply_to: { type: "string", description: "Mensagem a citar (quote): 'last' | 'last_received' | 'last_sent' (posicional, dispensa read) ou UUID de read/search" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true para enviar; so apos o usuario confirmar" },
         allow_new: { type: "boolean", description: "Permite enviar pra numero novo (primeiro contato); exige instance" },
         humanize: { type: "boolean", description: "Calcula delay_typing automatico por tamanho/tipo (default true)" },
@@ -1546,28 +1637,34 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "edit_message",
-    description: "Edita o texto de uma mensagem enviada por voce (from_me, texto, ate 15min). FLUXO: 1a SEM confirmed (bloqueia); 2a com confirmed:true.",
+    description: "Edita o texto de uma mensagem enviada por voce (from_me, texto, ate 15min). CAMINHO RAPIDO: chat (+target, default last_sent = sua ultima msg) dispensa read previo. FLUXO: 1a SEM confirmed (bloqueia e devolve preview + message_id); 2a com confirmed:true e ESSE message_id.",
     inputSchema: {
       type: "object",
       properties: {
-        message_id: { type: "string", description: "UUID da mensagem (de read/search)" },
+        chat: { type: "string", description: "Nome ou telefone do chat — alvo posicional, dispensa message_id" },
+        target: { type: "string", enum: ["last", "last_sent"], description: "Com chat: qual mensagem (default last_sent = sua ultima)" },
+        message_id: { type: "string", description: "UUID da mensagem (de read/search ou do blocked)" },
         new_content: { type: "string", description: "Novo texto" },
+        instance: { type: "string", description: "Com chat: instancia quando o chat existe nas duas" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao" },
       },
-      required: ["message_id", "new_content"],
+      required: ["new_content"],
       additionalProperties: false,
     },
   },
   {
     name: "delete_message",
-    description: "Deleta uma mensagem enviada por voce (apaga pra todos). FLUXO: 1a SEM confirmed (bloqueia); 2a com confirmed:true.",
+    description: "Deleta uma mensagem enviada por voce (apaga pra todos). CAMINHO RAPIDO: chat (+target, default last_sent = sua ultima msg) dispensa read previo. FLUXO: 1a SEM confirmed (bloqueia e devolve preview + message_id); 2a com confirmed:true e ESSE message_id.",
     inputSchema: {
       type: "object",
       properties: {
-        message_id: { type: "string", description: "UUID da mensagem (de read/search)" },
+        chat: { type: "string", description: "Nome ou telefone do chat — alvo posicional, dispensa message_id" },
+        target: { type: "string", enum: ["last", "last_sent"], description: "Com chat: qual mensagem (default last_sent = sua ultima)" },
+        message_id: { type: "string", description: "UUID da mensagem (de read/search ou do blocked)" },
+        instance: { type: "string", description: "Com chat: instancia quando o chat existe nas duas" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao" },
       },
-      required: ["message_id"],
+      required: [],
       additionalProperties: false,
     },
   },
@@ -1585,7 +1682,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "zapi_action",
-    description: "Executa acao avancada do provider WhatsApp (Z-API ou Evolution; operacoes infrequentes nao cobertas pelas tools). Actions de envio (send-poll, forward, edit-message) exigem confirmed:true. Nota: forward so existe na Z-API.",
+    description: "Executa acao avancada do provider WhatsApp (Z-API ou Evolution; operacoes infrequentes nao cobertas pelas tools). Actions de envio (send-poll, forward, edit-message) exigem confirmed:true. forward aceita posicional: params {phone: destino, from_chat: nome/telefone de origem, target: last|last_received|last_sent} — resolve messageId sozinho. Nota: forward so existe na Z-API.",
     inputSchema: {
       type: "object",
       properties: {
