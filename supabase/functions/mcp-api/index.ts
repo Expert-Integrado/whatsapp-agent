@@ -651,11 +651,16 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (error) return json({ error: error.message }, 500);
 
         let catQ = supabase.from("v_chats_with_categories").select("category_slugs,category_labels,linked_pipedrive_person_id").eq("chat_id", resolved.chat_id);
-        let metaQ = supabase.from("chats").select("observations,links,voice_profile,brain_contact_id,is_group,phone,contact_about,business_profile,profile_refreshed_at").eq("chat_id", resolved.chat_id);
+        let metaQ = supabase.from("chats").select("observations,links,voice_profile,brain_contact_id,is_group,phone,contact_about,business_profile,profile_refreshed_at,waiting_on,last_received_at,resolved_at,snooze_until").eq("chat_id", resolved.chat_id);
         if (resolved.instance_id) { catQ = catQ.eq("instance_id", resolved.instance_id); metaQ = metaQ.eq("instance_id", resolved.instance_id); }
         const [catRes, metaRes] = await Promise.all([catQ.maybeSingle(), metaQ.maybeSingle()]);
         const catRow: any = catRes.data, chatMeta: any = metaRes.data;
         const prof = (await refreshContactProfile(resolved.chat_id, resolved.instance_id, chatMeta)) ?? chatMeta;
+        // Mesma regra do waiting_on_effective das views (0045), espelhada em TS.
+        const wEff = chatMeta?.waiting_on === "me" && chatMeta?.resolved_at
+          && (!chatMeta.last_received_at || new Date(chatMeta.last_received_at).getTime() <= new Date(chatMeta.resolved_at).getTime())
+          && (!chatMeta.snooze_until || Date.now() < new Date(chatMeta.snooze_until).getTime())
+          ? "resolved" : chatMeta?.waiting_on;
 
         return json({
           ok: true,
@@ -668,6 +673,9 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(chatMeta?.brain_contact_id && { brain_contact_id: chatMeta.brain_contact_id }),
           ...(prof?.contact_about && { contact_about: prof.contact_about }),
           ...(prof?.business_profile && { business_profile: prof.business_profile }),
+          ...(wEff && { waiting_on: wEff }),
+          ...(chatMeta?.resolved_at && { resolved_at: chatMeta.resolved_at }),
+          ...(chatMeta?.snooze_until && { snooze_until: chatMeta.snooze_until }),
           categories: catRow?.category_slugs || [],
           category_labels: catRow?.category_labels || [],
           ...(catRow?.linked_pipedrive_person_id && { linked_pipedrive_person_id: catRow.linked_pipedrive_person_id }),
@@ -677,7 +685,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       }
 
       case "inbox": {
-        const { limit = 15, since, waiting_on: waitingFilter, exclude_groups = false, category_slugs, exclude_categories, min_idle_days, instance } = params;
+        const { limit = 15, since, waiting_on: waitingFilter, exclude_groups = false, category_slugs, exclude_categories, min_idle_days, include_dormant = false, instance } = params;
         const instKey = instance ? await resolveInstanceKey(instance) : null;
         const instEq = (q: any) => (instKey ? q.eq("instance_id", instKey) : q);
         const ck = (m: any) => `${m.instance_id}|${m.chat_id}`;
@@ -692,18 +700,23 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         // Ordenacao "mais parado primeiro" (idle asc) quando min_idle_days ou
         // waiting_on:me — absorve a antiga skill 'estou-devendo' direto na tool.
         const idleFirst = min_idle_days != null || waitingFilter === "me";
+        // Dormente (0045): 'esperando eu responder' parado ha 90+ dias e conversa
+        // morta, nao divida — sai da lista padrao. Pedir min_idle_days ou
+        // include_dormant traz de volta.
+        const dormantCutoff = waitingFilter === "me" && min_idle_days == null && !include_dormant;
         let q = supabase.from(useCategoryView ? "v_chats_with_categories" : "v_chats_with_contact")
           .select(useCategoryView
-            ? "instance_id,chat_id,chat_name,is_group,last_message_at,last_received_at,last_sent_at,waiting_on,category_slugs"
-            : "instance_id,chat_id,chat_name,contact_name,is_group,last_message_at,last_received_at,last_sent_at,waiting_on,contact_about,business_description")
+            ? "instance_id,chat_id,chat_name,is_group,last_message_at,last_received_at,last_sent_at,waiting_on_effective,category_slugs"
+            : "instance_id,chat_id,chat_name,contact_name,is_group,last_message_at,last_received_at,last_sent_at,waiting_on_effective,contact_about,business_description")
           .order("last_message_at", { ascending: idleFirst, nullsFirst: false })
           .order("chat_id", { ascending: true })
           .limit(limit);
         q = instEq(q);
         if (since) q = q.gt("last_message_at", since);
         if (exclude_groups) q = q.eq("is_group", false);
-        if (waitingFilter) q = q.eq("waiting_on", waitingFilter);
+        if (waitingFilter) q = q.eq("waiting_on_effective", waitingFilter);
         if (min_idle_days != null) q = q.lte("last_message_at", new Date(Date.now() - min_idle_days * 86400000).toISOString());
+        if (dormantCutoff) q = q.gte("last_message_at", new Date(Date.now() - 90 * 86400000).toISOString());
         if (category_slugs?.length) q = q.overlaps("category_slugs", category_slugs);
         if (exclude_categories?.length) q = q.not("category_slugs", "ov", `{${exclude_categories.join(",")}}`);
         const { data: rawChats, error } = await q;
@@ -741,7 +754,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         for (const m of enrichedList) enrichedByChat[ck(m)] = m;
         const result = chats.map((c: any) => {
           const msg = enrichedByChat[ck(c)];
-          const waiting_on = c.waiting_on;
+          const waiting_on = c.waiting_on_effective;
           const enriched = contactById[ck(c)] || {};
           const contact_about = enriched.contact_about ?? c.contact_about;
           const business_description = enriched.business_description ?? c.business_description;
@@ -757,7 +770,10 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
             last_message: msg ? { content: msg.content?.slice(0, 120), type: msg.message_type, from_me: msg.from_me, ...(AUDIO_TYPES.has(msg.message_type) && { transcription: msg.transcription }) } : null,
           };
         });
-        return json({ ok: true, chats: result, total: result.length });
+        return json({
+          ok: true, chats: result, total: result.length,
+          ...(dormantCutoff && { note: "Chats dormentes (90+ dias parados) ocultos por padrao — use min_idle_days ou include_dormant:true pra ve-los." }),
+        });
         // NOTA: transcricao de audio na last_message ainda nao portada (proximo incremento).
       }
 
@@ -905,6 +921,41 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const { error } = await updateQ;
         if (error) return json({ error: error.message }, 500);
         return json({ ok: true, annotated: true, chat_id: resolved.chat_id, chat_name: resolved.chat_name, instance: resolved.instance_id, ...update });
+      }
+
+      case "resolve": {
+        // Modelo Zendesk (0045): resolved mascara o waiting_on 'me' ATE chegar
+        // mensagem nova (reabertura automatica via last_received_at > resolved_at).
+        // snooze_until: some ate a data OU ate responderem. reopen: desfaz manual.
+        const { chat, snooze_until, reopen = false, instance } = params;
+        const resolved = await resolveChat(chat, instance);
+        if (resolved.error) return json({ error: resolved.error }, 400);
+        if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
+        let update: any;
+        if (reopen) {
+          update = { resolved_at: null, snooze_until: null };
+        } else {
+          let snooze: string | null = null;
+          if (snooze_until != null) {
+            const d = new Date(snooze_until);
+            if (isNaN(d.getTime())) return json({ error: "snooze_until invalido — use ISO 8601 (ex.: 2026-07-13T12:00:00-03:00)." }, 400);
+            if (d.getTime() <= Date.now()) return json({ error: "snooze_until precisa ser no futuro." }, 400);
+            snooze = d.toISOString();
+          }
+          update = { resolved_at: new Date().toISOString(), snooze_until: snooze };
+        }
+        let updQ = supabase.from("chats").update(update).eq("chat_id", resolved.chat_id);
+        if (resolved.instance_id) updQ = updQ.eq("instance_id", resolved.instance_id);
+        const { error: resErr } = await updQ;
+        if (resErr) return json({ error: resErr.message }, 500);
+        return json({
+          ok: true, chat_id: resolved.chat_id, chat_name: resolved.chat_name, instance: resolved.instance_id,
+          resolved: !reopen,
+          ...(update.snooze_until && { snooze_until: update.snooze_until, snooze_until_brt: toBRT(update.snooze_until) }),
+          note: reopen ? "Chat reaberto — volta a contar como esperando resposta." :
+            "Nao conta mais como 'esperando resposta'. Reabre sozinho se a pessoa mandar mensagem nova" +
+            (update.snooze_until ? " ou quando o snooze vencer." : "."),
+        });
       }
 
       case "download_attachment": {
@@ -1213,6 +1264,7 @@ const TOOL_TO_ACTION: Record<string, string> = {
   categorize_chat: "categorize",
   uncategorize_chat: "uncategorize",
   annotate_chat: "annotate",
+  resolve_chat: "resolve",
 };
 
 function rpc(id: any, payload: Record<string, unknown>): Response {
@@ -1234,19 +1286,35 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "inbox",
-    description: "Lista conversas com a ultima mensagem de cada. Use waiting_on:'me' para 'do que estou devendo / quem espera resposta' (o contato mandou por ultimo) — combine com min_idle_days pra so as paradas ha N+ dias; o resultado ja vem ordenado por mais parado primeiro e traz idle_days por chat. Filtra tambem por categoria e grupos.",
+    description: "Lista conversas com a ultima mensagem de cada. Use waiting_on:'me' para 'do que estou devendo / quem espera resposta' (o contato mandou por ultimo E o chat nao foi marcado resolvido) — combine com min_idle_days pra so as paradas ha N+ dias; o resultado ja vem ordenado por mais parado primeiro e traz idle_days por chat. Grupo nunca conta como esperando. Chats 90+ dias parados ficam dormentes (ocultos por padrao no filtro 'me'). Filtra tambem por categoria e grupos.",
     inputSchema: {
       type: "object",
       properties: {
         limit: { type: "number", description: "Max de chats (default 15)" },
         since: { type: "string", description: "ISO timestamp — so chats com atividade apos esta data" },
-        waiting_on: { type: "string", enum: ["me", "lead", "none"], description: "Filtra por quem deve responder agora ('me' = voce esta devendo)" },
-        exclude_groups: { type: "boolean", description: "Se true, ignora grupos (so 1:1) — recomendado pra 'estou devendo'" },
+        waiting_on: { type: "string", enum: ["me", "lead", "none", "resolved"], description: "Filtra por quem deve responder agora ('me' = voce esta devendo; 'resolved' = marcados resolvidos ainda sem resposta nova)" },
+        exclude_groups: { type: "boolean", description: "Se true, ignora grupos (so 1:1)" },
         category_slugs: { type: "array", items: { type: "string" }, description: "So chats com pelo menos uma destas categorias" },
         exclude_categories: { type: "array", items: { type: "string" }, description: "Exclui chats com qualquer destas categorias (ex.: descartar, comunidade)" },
-        min_idle_days: { type: "number", description: "So chats parados ha N+ dias (pela ultima msg relevante). Ordena por mais parado primeiro." },
+        min_idle_days: { type: "number", description: "So chats parados ha N+ dias (pela ultima msg relevante). Ordena por mais parado primeiro e desliga o corte de dormentes." },
+        include_dormant: { type: "boolean", description: "Inclui os dormentes (90+ dias parados) no filtro waiting_on:'me'" },
         instance: { type: "string", description: "Filtra por instancia (alias 'pessoal'/'profissional' ou instance_id)" },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "resolve_chat",
+    description: "Marca a conversa como resolvida: sai do 'esperando resposta' mesmo que a ultima palavra tenha sido do contato (ex.: cortesia tipo 'obrigado'). REABRE SOZINHA se a pessoa mandar mensagem nova. snooze_until adia a cobranca ate uma data ('nao me lembra ate segunda') — tambem reabre antes se responderem. reopen:true desfaz manualmente.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat: { type: "string", description: "Nome, telefone ou chat_id da conversa" },
+        snooze_until: { type: "string", description: "ISO 8601 futuro — esconde ate esta data em vez de resolver de vez" },
+        reopen: { type: "boolean", description: "true = desfaz o resolvido/snooze (volta a contar como esperando)" },
+        instance: { type: "string", description: "Instancia (alias ou instance_id)" },
+      },
+      required: ["chat"],
       additionalProperties: false,
     },
   },
