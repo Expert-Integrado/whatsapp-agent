@@ -1286,7 +1286,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "inbox",
-    description: "Lista conversas com a ultima mensagem de cada. Use waiting_on:'me' para 'do que estou devendo / quem espera resposta' (o contato mandou por ultimo E o chat nao foi marcado resolvido) — combine com min_idle_days pra so as paradas ha N+ dias; o resultado ja vem ordenado por mais parado primeiro e traz idle_days por chat. Grupo nunca conta como esperando. Chats 90+ dias parados ficam dormentes (ocultos por padrao no filtro 'me'). Filtra tambem por categoria e grupos.",
+    description: "Lista conversas com a ultima mensagem de cada. Use waiting_on:'me' para 'do que estou devendo / quem espera resposta' (o contato mandou por ultimo E o chat nao foi marcado resolvido) — combine com min_idle_days pra so as paradas ha N+ dias; o resultado ja vem ordenado por mais parado primeiro e traz idle_days por chat. Grupo nunca conta como esperando. Chats 90+ dias parados ficam dormentes (ocultos por padrao no filtro 'me'). Na triagem: chat que o usuario descartar ('esse ignora', 'nao vou responder') = chamar resolve_chat nele na hora. Filtra tambem por categoria e grupos.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1305,7 +1305,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "resolve_chat",
-    description: "Marca a conversa como resolvida: sai do 'esperando resposta' mesmo que a ultima palavra tenha sido do contato (ex.: cortesia tipo 'obrigado'). REABRE SOZINHA se a pessoa mandar mensagem nova. snooze_until adia a cobranca ate uma data ('nao me lembra ate segunda') — tambem reabre antes se responderem. reopen:true desfaz manualmente.",
+    description: "Marca a conversa como resolvida: sai do 'esperando resposta' mesmo que a ultima palavra tenha sido do contato (ex.: cortesia tipo 'obrigado'). CHAME PROATIVAMENTE quando o usuario sinalizar encerramento de qualquer jeito ('ignora esse', 'nao precisa responder', 'deixa', 'ja resolvi', descarte durante triagem de inbox) — nao exija a palavra 'resolve' nem peca confirmacao. REABRE SOZINHA se a pessoa mandar mensagem nova. snooze_until adia a cobranca ate uma data ('nao me lembra ate segunda') — tambem reabre antes se responderem. reopen:true desfaz manualmente. Nao e preciso apos send (responder ja zera a pendencia).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1611,7 +1611,12 @@ async function handleMcp(reqBody: any): Promise<Response> {
   const { method, params, id } = reqBody;
   switch (method) {
     case "initialize":
-      return rpcResult(id, { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO });
+      return rpcResult(id, {
+        protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO,
+        // Injetado no system prompt de todo cliente MCP — comportamento global
+        // sem depender de CLAUDE.md/skill por maquina.
+        instructions: "Ciclo de vida de conversa: quando o usuario sinalizar de QUALQUER forma que uma conversa 1:1 esta encerrada ou nao merece resposta ('nao precisa responder', 'ignora esse', 'deixa', 'ja resolvi', 'so cortesia', descartar um chat durante triagem do inbox), chame resolve_chat naquele chat NA HORA, sem pedir confirmacao e sem exigir a palavra 'resolve'. Se ele disser 'depois' / 'semana que vem', use resolve_chat com snooze_until. Responder a mensagem ja zera a pendencia sozinho (nao chame resolve_chat depois de send). Nunca resolva por iniciativa propria sem sinal do usuario.",
+      });
     case "tools/list":
       return rpcResult(id, { tools: TOOL_SCHEMAS });
     case "ping":
