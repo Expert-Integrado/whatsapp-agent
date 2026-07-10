@@ -114,6 +114,48 @@ async function resolveInstanceKey(key: string | null | undefined): Promise<strin
   return rows.find((r: any) => r.alias === key || r.instance_id === key)?.instance_id ?? null;
 }
 
+// ─── Contact profile cache (recado + perfil business) ─────────────────────────
+// Refresh lazy no read com TTL: recado ('about') e perfil business do contato
+// vem do wa-proxy (get-contact-info / get-business-profile) e ficam em chats
+// (0042). O inbox le so o cache — nunca chama provider por linha. Best-effort:
+// provider fora nao bloqueia o read e nao grava profile_refreshed_at (retenta
+// no proximo read).
+const PROFILE_TTL_MS = 7 * 86400000;
+async function refreshContactProfile(chatId: string, instanceId: string | null, meta: any):
+  Promise<{ contact_about: string | null; business_profile: any } | null> {
+  if (!meta || meta.is_group) return null;
+  if (meta.profile_refreshed_at && Date.now() - new Date(meta.profile_refreshed_at).getTime() < PROFILE_TTL_MS) return null;
+  const phone = String(meta.phone || chatId);
+  if (!/^\d{8,15}$/.test(phone)) return null; // lid/broadcast/status nao tem perfil
+  const call = async (action: string) => {
+    try {
+      const { data } = await callEdge("wa-proxy", {
+        action, params: { phone }, agent_name: "mcp-api-profile-refresh",
+        ...(instanceId && { instance: instanceId }),
+      });
+      return data?.ok ? data.result : null;
+    } catch { return null; }
+  };
+  const [info, biz] = await Promise.all([call("get-contact-info"), call("get-business-profile")]);
+  if (info === null && biz === null) return null;
+  const about = typeof info?.about === "string" && info.about.trim() ? info.about.trim() : null;
+  const hasBiz = biz && typeof biz === "object" &&
+    (biz.description || biz.email || biz.address || biz.websites?.length || biz.categories?.length);
+  const business_profile = hasBiz ? {
+    description: biz.description ?? null,
+    email: biz.email ?? null,
+    address: biz.address ?? null,
+    websites: biz.websites ?? [],
+    categories: (biz.categories ?? []).map((c: any) => c?.displayName ?? c),
+  } : null;
+  let upd = supabase.from("chats")
+    .update({ contact_about: about, business_profile, profile_refreshed_at: new Date().toISOString() })
+    .eq("chat_id", chatId);
+  if (instanceId) upd = upd.eq("instance_id", instanceId);
+  await upd;
+  return { contact_about: about, business_profile };
+}
+
 // ─── BRT helpers ──────────────────────────────────────────────────────────────
 function toBRT(iso: string | null): string | null {
   if (!iso) return null;
@@ -609,10 +651,11 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (error) return json({ error: error.message }, 500);
 
         let catQ = supabase.from("v_chats_with_categories").select("category_slugs,category_labels,linked_pipedrive_person_id").eq("chat_id", resolved.chat_id);
-        let metaQ = supabase.from("chats").select("observations,links,voice_profile,brain_contact_id").eq("chat_id", resolved.chat_id);
+        let metaQ = supabase.from("chats").select("observations,links,voice_profile,brain_contact_id,is_group,phone,contact_about,business_profile,profile_refreshed_at").eq("chat_id", resolved.chat_id);
         if (resolved.instance_id) { catQ = catQ.eq("instance_id", resolved.instance_id); metaQ = metaQ.eq("instance_id", resolved.instance_id); }
         const [catRes, metaRes] = await Promise.all([catQ.maybeSingle(), metaQ.maybeSingle()]);
         const catRow: any = catRes.data, chatMeta: any = metaRes.data;
+        const prof = (await refreshContactProfile(resolved.chat_id, resolved.instance_id, chatMeta)) ?? chatMeta;
 
         return json({
           ok: true,
@@ -623,6 +666,8 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(chatMeta?.links?.length && { links: chatMeta.links }),
           ...(chatMeta?.voice_profile && { voice_profile: chatMeta.voice_profile }),
           ...(chatMeta?.brain_contact_id && { brain_contact_id: chatMeta.brain_contact_id }),
+          ...(prof?.contact_about && { contact_about: prof.contact_about }),
+          ...(prof?.business_profile && { business_profile: prof.business_profile }),
           categories: catRow?.category_slugs || [],
           category_labels: catRow?.category_labels || [],
           ...(catRow?.linked_pipedrive_person_id && { linked_pipedrive_person_id: catRow.linked_pipedrive_person_id }),
@@ -650,7 +695,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         let q = supabase.from(useCategoryView ? "v_chats_with_categories" : "v_chats_with_contact")
           .select(useCategoryView
             ? "instance_id,chat_id,chat_name,is_group,last_message_at,last_received_at,last_sent_at,waiting_on,category_slugs"
-            : "instance_id,chat_id,chat_name,contact_name,is_group,last_message_at,last_received_at,last_sent_at,waiting_on")
+            : "instance_id,chat_id,chat_name,contact_name,is_group,last_message_at,last_received_at,last_sent_at,waiting_on,contact_about,business_description")
           .order("last_message_at", { ascending: idleFirst, nullsFirst: false })
           .order("chat_id", { ascending: true })
           .limit(limit);
@@ -674,7 +719,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         let contactById: Record<string, any> = {};
         if (useCategoryView && chats.length) {
           const ids = chats.map((c: any) => c.chat_id);
-          const { data: enriched } = await instEq(supabase.from("v_chats_with_contact").select("instance_id,chat_id,contact_name").in("chat_id", ids));
+          const { data: enriched } = await instEq(supabase.from("v_chats_with_contact").select("instance_id,chat_id,contact_name,contact_about,business_description").in("chat_id", ids));
           contactById = Object.fromEntries((enriched || []).map((e: any) => [ck(e), e]));
         }
         let categoriesByChat: Record<string, any> = {};
@@ -698,9 +743,13 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           const msg = enrichedByChat[ck(c)];
           const waiting_on = c.waiting_on;
           const enriched = contactById[ck(c)] || {};
+          const contact_about = enriched.contact_about ?? c.contact_about;
+          const business_description = enriched.business_description ?? c.business_description;
           return {
             chat_id: c.chat_id, instance: c.instance_id, instance_label: labelOf(c.instance_id),
             name: enriched.contact_name || c.contact_name || c.chat_name, is_group: c.is_group,
+            ...(contact_about && { contact_about }),
+            ...(business_description && { business_description }),
             categories: categoriesByChat[ck(c)] || [],
             last_message_at: c.last_message_at, ...(c.last_message_at && { last_message_at_brt: toBRT(c.last_message_at) }),
             last_received_at: c.last_received_at, last_sent_at: c.last_sent_at, waiting_on,
