@@ -199,11 +199,17 @@ async function persistMessage(
   const isCommunity = raw.isCommunity === true;
   const profileThumbnail = (typeof raw.photo === "string" ? raw.photo : null);
 
+  // Nome "lixo" (LID cru tipo 145758338695280@lid ou numero puro) NUNCA e gravado:
+  // omitido do upsert, o conflito preserva o chat_name existente e chat novo nasce
+  // com null (chat_id ja carrega o numero). Sem isso a Z-API sobrescrevia nomes bons
+  // e a busca por nome ficava cega (539 chats estavam assim em 10/07).
+  const nameIsJunk = !ev.chatName || /@lid$/.test(ev.chatName) || /^[0-9]+$/.test(ev.chatName);
+
   await supabase.from("chats").upsert({
     instance_id: instanceId,
     chat_id: chatId,
     phone,
-    chat_name: ev.chatName,
+    ...(nameIsJunk ? {} : { chat_name: ev.chatName }),
     is_group: ev.isGroup,
     is_community: isCommunity,
     profile_thumbnail: profileThumbnail,

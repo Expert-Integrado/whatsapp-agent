@@ -416,10 +416,16 @@ export class ZapiProvider implements WaProvider {
       };
     }
 
-    // Read-only Z-API endpoints are GET with no body (POST returns 405)
+    // Read-only Z-API endpoints are GET with no body (POST returns 405).
+    // Params viram query string (ex: contacts?page=&pageSize= — paginacao);
+    // action segue allowlisted e input nunca entra no path (anti-SSRF preservado).
     const GET_ACTIONS = new Set<WaAction>(["status", "chats", "contacts"]);
     if (GET_ACTIONS.has(action)) {
-      return { url: `${base}/${action}`, method: "GET", headers };
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(p ?? {})) {
+        if (v !== null && v !== undefined) qs.set(k, String(v));
+      }
+      return { url: `${base}/${action}${qs.toString() ? `?${qs.toString()}` : ""}`, method: "GET", headers };
     }
 
     // Generic case: POST /{action} with full params as body

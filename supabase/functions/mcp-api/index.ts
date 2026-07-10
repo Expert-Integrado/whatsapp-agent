@@ -139,6 +139,12 @@ async function refreshContactProfile(chatId: string, instanceId: string | null, 
   const [info, biz] = await Promise.all([call("get-contact-info"), call("get-business-profile")]);
   if (info === null && biz === null) return null;
   const about = typeof info?.about === "string" && info.about.trim() ? info.about.trim() : null;
+  // Aproveita o round-trip pra curar chat_name lixo (LID cru / numero puro):
+  // o get-contact-info devolve o nome real (name/vname/short) do contato.
+  const isJunkName = (n: unknown) => !n || /@lid$/.test(String(n)) || /^[0-9]+$/.test(String(n));
+  const provName = [info?.name, info?.vname, info?.short]
+    .find((x: any) => typeof x === "string" && x.trim() && !isJunkName(x.trim()));
+  const nameFix = isJunkName(meta.chat_name) && provName ? { chat_name: String(provName).trim() } : {};
   const hasBiz = biz && typeof biz === "object" &&
     (biz.description || biz.email || biz.address || biz.websites?.length || biz.categories?.length);
   const business_profile = hasBiz ? {
@@ -149,7 +155,7 @@ async function refreshContactProfile(chatId: string, instanceId: string | null, 
     categories: (biz.categories ?? []).map((c: any) => c?.displayName ?? c),
   } : null;
   let upd = supabase.from("chats")
-    .update({ contact_about: about, business_profile, profile_refreshed_at: new Date().toISOString() })
+    .update({ contact_about: about, business_profile, profile_refreshed_at: new Date().toISOString(), ...nameFix })
     .eq("chat_id", chatId);
   if (instanceId) upd = upd.eq("instance_id", instanceId);
   await upd;
@@ -651,11 +657,24 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (error) return json({ error: error.message }, 500);
 
         let catQ = supabase.from("v_chats_with_categories").select("category_slugs,category_labels,linked_pipedrive_person_id").eq("chat_id", resolved.chat_id);
-        let metaQ = supabase.from("chats").select("observations,links,voice_profile,brain_contact_id,is_group,phone,contact_about,business_profile,profile_refreshed_at,waiting_on,last_received_at,resolved_at,snooze_until").eq("chat_id", resolved.chat_id);
+        let metaQ = supabase.from("chats").select("chat_name,observations,links,voice_profile,brain_contact_id,is_group,phone,contact_about,business_profile,profile_refreshed_at,waiting_on,last_received_at,resolved_at,snooze_until").eq("chat_id", resolved.chat_id);
         if (resolved.instance_id) { catQ = catQ.eq("instance_id", resolved.instance_id); metaQ = metaQ.eq("instance_id", resolved.instance_id); }
         const [catRes, metaRes] = await Promise.all([catQ.maybeSingle(), metaQ.maybeSingle()]);
         const catRow: any = catRes.data, chatMeta: any = metaRes.data;
-        const prof = (await refreshContactProfile(resolved.chat_id, resolved.instance_id, chatMeta)) ?? chatMeta;
+        // Stale-while-revalidate: o refresh sincrono custava ~800ms de provider por
+        // chat com cache vencido, DENTRO do read. Agora responde com o cache e
+        // revalida em background (EdgeRuntime.waitUntil segura a function viva).
+        // So espera quando o chat nunca foi enriquecido (senao 1o read sai sem perfil).
+        let prof: any = chatMeta;
+        if (chatMeta && !chatMeta.is_group) {
+          const neverRefreshed = !chatMeta.profile_refreshed_at && !chatMeta.contact_about && !chatMeta.business_profile;
+          if (neverRefreshed) {
+            prof = (await refreshContactProfile(resolved.chat_id, resolved.instance_id, chatMeta)) ?? chatMeta;
+          } else {
+            const bg = refreshContactProfile(resolved.chat_id, resolved.instance_id, chatMeta).catch(() => null);
+            (globalThis as any).EdgeRuntime?.waitUntil?.(bg);
+          }
+        }
         // Mesma regra do waiting_on_effective das views (0045), espelhada em TS.
         const wEff = chatMeta?.waiting_on === "me" && chatMeta?.resolved_at
           && (!chatMeta.last_received_at || new Date(chatMeta.last_received_at).getTime() <= new Date(chatMeta.resolved_at).getTime())
@@ -1056,13 +1075,45 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       }
 
       case "react": {
-        const { message_id, emoji } = params;
-        const { data: msg, error } = await supabase.from("messages").select("provider_msg_id,chat_id,instance_id").eq("id", message_id).single();
-        if (error || !msg) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
+        const { message_id, chat, target = "last", emoji, instance } = params;
+        let msg: any = null;
+        if (message_id) {
+          const { data, error } = await supabase.from("messages").select("provider_msg_id,chat_id,instance_id,content,message_type,from_me,message_ts").eq("id", message_id).single();
+          if (error || !data) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
+          msg = data;
+        } else if (chat) {
+          // Atalho posicional: resolve o chat e reage na ultima mensagem em UMA
+          // chamada — sem exigir um read inteiro so pra descobrir o message_id.
+          const resolved = await resolveChat(chat, instance);
+          if (resolved.error) return json({ ok: false, error: resolved.error });
+          if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
+          const chatIdSet = await expandChatIdsViaLidMapping(resolved.chat_id, resolved.instance_id);
+          let q = supabase.from("messages")
+            .select("provider_msg_id,chat_id,instance_id,content,message_type,from_me,message_ts")
+            .in("chat_id", chatIdSet)
+            .not("provider_msg_id", "is", null)
+            .not("provider_msg_id", "ilike", "pending-%")
+            .order("message_ts", { ascending: false, nullsFirst: false })
+            .limit(1);
+          if (resolved.instance_id) q = q.eq("instance_id", resolved.instance_id);
+          if (target === "last_received") q = q.eq("from_me", false);
+          else if (target === "last_sent") q = q.eq("from_me", true);
+          const { data, error } = await q;
+          if (error) return json({ error: error.message }, 500);
+          if (!data?.length) return json({ error: `nenhuma mensagem reagivel (${target}) em ${resolved.chat_name ?? resolved.chat_id}` }, 404);
+          msg = data[0];
+        } else {
+          return json({ error: "Forneca message_id OU chat (com target opcional)." }, 400);
+        }
         const phone = String(msg.chat_id).replace(/@.*$/, "");
         const { status, data } = await callEdge("wa-proxy", { action: "send-reaction", params: { phone, messageId: msg.provider_msg_id, reaction: emoji }, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
-        return json({ ok: true, reacted: true, emoji, result: data?.result });
+        // Preview da mensagem alvo: confirma que reagiu na certa sem precisar de read.
+        return json({ ok: true, reacted: true, emoji, target_message: {
+          from_me: msg.from_me, type: msg.message_type,
+          content: typeof msg.content === "string" ? msg.content.slice(0, 160) : null,
+          message_ts_brt: toBRT(msg.message_ts),
+        }, result: data?.result });
       }
 
       case "edit_message": {
@@ -1414,14 +1465,17 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "react",
-    description: "Reage a uma mensagem com emoji. Precisa do message_id (UUID de read/search). String vazia remove a reacao.",
+    description: "Reage a uma mensagem com emoji. CAMINHO RAPIDO (preferir): passe chat + target ('last' | 'last_received' | 'last_sent') e a reacao sai em 1 chamada, sem read antes — a resposta traz preview da mensagem alvo. message_id (UUID de read/search) so quando o alvo NAO e a ultima mensagem. String vazia remove a reacao.",
     inputSchema: {
       type: "object",
       properties: {
-        message_id: { type: "string", description: "UUID da mensagem (campo id de read/search)" },
+        chat: { type: "string", description: "Nome ou telefone do chat — reage na ultima mensagem (ver target). Alternativa rapida ao message_id." },
+        target: { type: "string", enum: ["last", "last_received", "last_sent"], description: "Com chat: qual mensagem. last = mais recente (default), last_received = ultima DELES, last_sent = ultima MINHA." },
+        message_id: { type: "string", description: "UUID da mensagem (campo id de read/search) — so quando o alvo nao e a ultima do chat" },
         emoji: { type: "string", description: "Emoji de reacao (ex: '❤️', '👍'). Vazio remove." },
+        instance: { type: "string", description: "Com chat: instancia (alias ou id) quando o chat existe nas duas" },
       },
-      required: ["message_id", "emoji"],
+      required: ["emoji"],
       additionalProperties: false,
     },
   },
