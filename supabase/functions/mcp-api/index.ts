@@ -10,6 +10,7 @@
 // check_message, sync_groups, transcribe, send*.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { normalizePhoneBR, expandChatIdCandidates, pickPhoneChat } from "../_shared/wa/phone.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -191,26 +192,8 @@ const AUDIO_TYPES = new Set(["audio", "voice", "ptt"]);
 function normalize(str: string): string {
   return (str || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
-function normalizePhoneBR(digits: string): string[] {
-  const out = new Set<string>();
-  if (!digits) return [];
-  out.add(digits);
-  const flipNine = (d: string) => {
-    if (d.length === 13 && d.startsWith("55") && d[4] === "9") out.add(d.slice(0, 4) + d.slice(5));
-    else if (d.length === 12 && d.startsWith("55")) out.add(d.slice(0, 4) + "9" + d.slice(4));
-  };
-  flipNine(digits);
-  if (!digits.startsWith("55") && (digits.length === 10 || digits.length === 11)) {
-    const with55 = "55" + digits; out.add(with55); flipNine(with55);
-  }
-  return Array.from(out);
-}
-function expandChatIdCandidates(phoneVariants: string[]): string[] {
-  const suffixes = ["", "@s.whatsapp.net", "@c.us", "@lid", "-group", "@g.us"];
-  const out = new Set<string>();
-  for (const v of phoneVariants) for (const s of suffixes) out.add(v + s);
-  return Array.from(out);
-}
+// normalizePhoneBR / expandChatIdCandidates / pickPhoneChat vivem em
+// ../_shared/wa/phone.ts (extraidos pra teste unitario — auditoria 07/2026).
 function levenshtein(a: string, b: string): number {
   const m = a.length, n = b.length;
   const dp = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
@@ -357,33 +340,14 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
       .select("instance_id,chat_id,chat_name,contact_name,is_group,last_message_at").in("chat_id", idCandidates))
       .order("last_message_at", { ascending: false, nullsFirst: false }).order("chat_id", { ascending: true }).limit(10);
 
-    if (exact?.length === 1) return { chat_id: exact[0].chat_id, chat_name: exact[0].chat_name || exact[0].contact_name, instance_id: exact[0].instance_id };
-    if (exact && exact.length > 1) {
-      const numericos = exact.filter((c: any) => /^\d+$/.test(String(c.chat_id)));
-      const lids = exact.filter((c: any) => String(c.chat_id).endsWith("@lid"));
-      if (numericos.length === 1 && lids.length >= 1) {
-        const phoneCanonical = numericos[0].chat_id;
-        if (lids.every(() => phoneVariants.includes(phoneCanonical)))
-          return { chat_id: phoneCanonical, chat_name: numericos[0].chat_name || numericos[0].contact_name, instance_id: numericos[0].instance_id };
-      }
-      // Par real + fantasma do 9o digito: dois chats numericos, mesma instancia,
-      // variantes um do outro. O real tem identidade (nome de contato ou chat_name
-      // diferente do proprio numero); o fantasma nao — e nao pode vencer por recencia,
-      // porque envios engolidos renovam o last_message_at dele.
-      if (numericos.length === 2 && numericos[0].instance_id === numericos[1].instance_id
-          && normalizePhoneBR(String(numericos[0].chat_id)).includes(String(numericos[1].chat_id))) {
-        // Na view, contact_name = chat_name; fantasma tem nome = proprio numero.
-        const hasIdentity = (c: any) => {
-          const n = c.chat_name || c.contact_name;
-          return !!n && n !== c.chat_id;
-        };
-        const [a, b] = numericos;
-        const real = hasIdentity(a) && !hasIdentity(b) ? a : (hasIdentity(b) && !hasIdentity(a) ? b : null);
-        if (real) return { chat_id: real.chat_id, chat_name: real.chat_name || real.contact_name, instance_id: real.instance_id };
-      }
-      const ranked = exact.map((c: any) => ({ ...c, _score: applyChatBoost(50, c) })).sort((a: any, b: any) => b._score - a._score);
-      if (ranked[0]._score - ranked[1]._score >= 5) return { chat_id: ranked[0].chat_id, chat_name: ranked[0].chat_name || ranked[0].contact_name, instance_id: ranked[0].instance_id };
-      return { candidates: ranked.slice(0, 5).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, instance: c.instance_id })) };
+    // Decisao pura em pickPhoneChat (testada em _shared/wa/__tests__/phone.test.ts):
+    // so colapsos deterministicos de mesmo-contato escolhem sozinhos; 2+ chats
+    // genuinamente distintos SEMPRE viram candidates (auditoria 07/2026 — o
+    // ranking por boost ja mandou mensagem pro numero errado).
+    const pick = pickPhoneChat(exact ?? [], phoneVariants);
+    if (pick && "chat" in pick) return { chat_id: pick.chat.chat_id, chat_name: pick.chat.chat_name || pick.chat.contact_name, instance_id: pick.chat.instance_id };
+    if (pick && "candidates" in pick) {
+      return { candidates: pick.candidates.slice(0, 5).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, instance: c.instance_id })) };
     }
 
     const longest = phoneVariants.slice().sort((a, b) => b.length - a.length)[0];
@@ -393,9 +357,9 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
         .order("last_message_at", { ascending: false, nullsFirst: false }).order("chat_id", { ascending: true }).limit(5);
       if (prefix?.length === 1) return { chat_id: prefix[0].chat_id, chat_name: prefix[0].chat_name || prefix[0].contact_name, instance_id: prefix[0].instance_id };
       if (prefix && prefix.length > 1) {
-        const ranked = prefix.map((c: any) => ({ ...c, _score: applyChatBoost(40, c) })).sort((a: any, b: any) => b._score - a._score);
-        if (ranked[0]._score - ranked[1]._score >= 5) return { chat_id: ranked[0].chat_id, chat_name: ranked[0].chat_name || ranked[0].contact_name, instance_id: ranked[0].instance_id };
-        return { candidates: ranked.slice(0, 5).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, instance: c.instance_id })) };
+        // Prefixo casando 2+ chats = numeros DIFERENTES (pessoas diferentes).
+        // Nunca escolher por boost/recencia — sempre pedir desambiguacao.
+        return { candidates: prefix.slice(0, 5).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, instance: c.instance_id })) };
       }
     }
   }
@@ -1089,7 +1053,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
             ...(check.error && { _phone_unverified: check.error }),
             ...(newChatId !== typedPhone && { _canonicalized_from: typedPhone }) };
         }
-        if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
+        if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
         if (type !== "text" && !media_url) return json({ error: `media_url obrigatorio pra type "${type}".` }, 400);
         const targetInstance = wantInstance ?? resolved.instance_id;
         if (!force_send_after_inbound && !resolved._new && !resolved.is_group) {
@@ -1137,7 +1101,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (!confirmed) return json({ blocked: true, needs_confirmation: true, to, voice_id, text, instruction: "Mostre destinatario + texto + voice_id ao usuario e so reenvie com confirmed:true apos ele confirmar." });
         const resolved = await resolveChat(to, instance);
         if (resolved.error) return json({ ok: false, error: resolved.error });
-        if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates });
+        if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
         const targetInstance = (instance ? await resolveInstanceKey(instance) : null) ?? resolved.instance_id;
         const vbody: any = { chat_id: resolved.chat_id, text, voice_id, confirmed: true, agent_name: agent_name || "mcp-api", agent_request_id: crypto.randomUUID(), instance: targetInstance,
           ...(model_id && { model_id }), ...(stability !== undefined && { stability }), ...(similarity_boost !== undefined && { similarity_boost }), ...(style !== undefined && { style }), ...(speed !== undefined && { speed }) };
