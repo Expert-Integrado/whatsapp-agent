@@ -522,8 +522,14 @@
   </div>
   <div class="note-strip reveal">
     E mais: transcrição sob demanda, download de anexos, edição e apagamento de mensagens,
-    anotações por contato, sincronização de grupos, merge de chats duplicados… <strong>22 tools</strong>
+    anotações por contato, sincronização de grupos, merge de chats duplicados… <strong>23 tools</strong>
     no total — a lista completa está no <a href="https://github.com/Expert-Integrado/whatsapp-agent#manual-de-uso">README</a>.
+  </div>
+  <div class="note-strip reveal">
+    <strong>Pendência sem dívida eterna:</strong> o inbox sabe quem deve resposta (<code>waiting_on</code>),
+    grupos ficam fora do cálculo, e quando você sinaliza que uma conversa acabou ("ignora esse",
+    "não precisa responder") o agente marca como <strong>resolvida na hora</strong> — e ela reabre sozinha
+    se a pessoa voltar a falar. "Me lembra semana que vem" vira snooze.
   </div>
 </section>
 
@@ -570,6 +576,11 @@
         <li>Só evidência literal vira perfil — na dúvida, o contato fica sem perfil e o guide manda.</li>
       </ul>
     </div>
+  </div>
+  <div class="note-strip reveal">
+    <strong>E a voz literal:</strong> com uma conta ElevenLabs, "manda um áudio pra Ana" vira mensagem
+    de voz de verdade — <code>send_voice</code> transforma o texto em PTT usando a <strong>voz default da
+    instância</strong> (clone da sua voz ou uma voz do acervo, escolhida na instalação).
   </div>
 </section>
 

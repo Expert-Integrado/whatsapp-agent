@@ -39,6 +39,7 @@ Anote a escolha do operador (`zapi` ou `evolution`) — ela vai determinar quais
 |---|---|---|
 | **[Supabase](https://supabase.com)** | um projeto | project **ref**, **PAT** (Account → Access Tokens), **senha do banco**, **secret key** (Settings → API Keys) |
 | **[OpenAI](https://platform.openai.com)** | uma API key | `OPENAI_API_KEY` (transcricao de audio) |
+| **[ElevenLabs](https://elevenlabs.io)** *(opcional)* | uma API key | `ELEVENLABS_API_KEY` — so pra **mandar mensagens de voz** (`send_voice`, texto vira audio PTT). Sem ela, todo o resto funciona normal. |
 
 #### Caminho A — Z-API
 
@@ -95,6 +96,7 @@ ZAPI_INSTANCE_ID=...
 ZAPI_TOKEN=...
 ZAPI_CLIENT_TOKEN=...
 OPENAI_API_KEY=sk-...
+ELEVENLABS_API_KEY=...               # opcional — mensagens de voz (send_voice)
 ```
 
 ### Caminho B — Evolution API
@@ -109,6 +111,7 @@ EVO_BASE_URL=https://...             # URL base do servidor Evolution (sem barra
 EVO_INSTANCE=...                     # nome da instancia no servidor Evolution
 EVO_APIKEY=...                       # apikey do servidor Evolution
 OPENAI_API_KEY=sk-...
+ELEVENLABS_API_KEY=...               # opcional — mensagens de voz (send_voice)
 ```
 
 Antes de rodar o CLI, exporte o token no ambiente (o CLI o usa pra autenticar, sem login interativo):
@@ -172,6 +175,24 @@ curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/dat
 
 > `client_token` fica `NULL` (Evolution nao usa esse campo — a autenticacao e so a `apikey` em `auth_token`).
 
+### 2.3 Voz do agente (opcional — mensagens de voz)
+
+Se o operador forneceu `ELEVENLABS_API_KEY`, pergunte **qual voz** o agente deve usar quando ele pedir "manda um audio". Duas opcoes no [Voice Lab da ElevenLabs](https://elevenlabs.io/app/voice-lab):
+
+- **Clonar a propria voz** (recomendado — o audio sai como se fosse a pessoa): Voice Lab → *Add voice* → *Instant voice clone*, com 1-2 min de audio limpo.
+- **Escolher uma voz do acervo** da ElevenLabs.
+
+Nas duas, copie o **voice ID** da voz e grave como default da instancia — o `send_voice` usa esse ID sempre que o pedido nao especificar outro:
+
+```bash
+SQL="UPDATE wa_instance SET default_voice_id = '<VOICE_ID>' WHERE instance_id = '<INSTANCE_ID>';"
+curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"
+```
+
+> Sem `default_voice_id`, o `send_voice` exige `voice_id` explicito a cada chamada. Precedencia: `voice_id` do request > `default_voice_id` da instancia > env `DEFAULT_VOICE_ID`.
+
 ---
 
 ## 3. Secrets das edge functions
@@ -185,6 +206,7 @@ supabase secrets set --project-ref <SUPABASE_PROJECT_REF> \
   MCP_API_KEY=<aleatorio> \
   ZAPI_INSTANCE_ID=... ZAPI_TOKEN=... ZAPI_CLIENT_TOKEN=... \
   OPENAI_API_KEY=sk-... \
+  ELEVENLABS_API_KEY=... \
   INTERNAL_EDGE_JWT=<SUPABASE_SERVICE_ROLE_KEY>
 ```
 
@@ -195,9 +217,12 @@ supabase secrets set --project-ref <SUPABASE_PROJECT_REF> \
   MCP_API_KEY=<aleatorio> \
   EVO_BASE_URL=... EVO_INSTANCE=... EVO_APIKEY=... \
   OPENAI_API_KEY=sk-... \
+  ELEVENLABS_API_KEY=... \
   INTERNAL_EDGE_JWT=<SUPABASE_SERVICE_ROLE_KEY>
 ```
 
+> `ELEVENLABS_API_KEY` e **opcional** — omita a linha se o operador nao for usar mensagens de voz.
+>
 > O `SUPABASE_URL` e a `SUPABASE_SERVICE_ROLE_KEY` o Supabase **injeta automaticamente** nas functions. **Mas** a chave auto-injetada vem no formato novo (não-JWT), que o **Storage** e o gateway `verify_jwt` rejeitam. Por isso o `INTERNAL_EDGE_JWT` recebe o **service_role no formato JWT legado** (`eyJ…`, em *Settings → API Keys → Legacy*): é ele que as functions usam pra baixar áudio do Storage (transcrição) e pra chamadas edge→edge. Sem ele, o download de mídia falha com `400`.
 
 ---

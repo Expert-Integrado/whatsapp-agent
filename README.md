@@ -30,6 +30,7 @@ Três contas — todas com plano gratuito suficiente pra começar:
 | **[Supabase](https://supabase.com)** | Banco, storage e edge functions | Project ref + URL, a **secret key** (`sb_secret_…`) e um Personal Access Token (PAT) |
 | **[Z-API](https://z-api.io)** (ou Evolution API) | Gateway do WhatsApp | Z-API: `instance_id`, `auth_token`, `client_token` — e o seu número conectado via QR code. Evolution: URL do seu servidor + API key. Veja [Provedores de WhatsApp](#provedores-de-whatsapp-z-api-vs-evolution-api). |
 | **[OpenAI](https://platform.openai.com)** | Transcrição de áudio (Whisper) | API key |
+| **[ElevenLabs](https://elevenlabs.io)** *(opcional)* | Mensagens de voz — `send_voice` transforma texto em áudio PTT | API key + o **voice ID** da voz escolhida (clone da sua voz ou voz do acervo) |
 
 Ferramentas locais: **[Claude Desktop](https://claude.ai/download)** (Claude Code embutido, na aba **Code**) e o **[Supabase CLI](https://supabase.com/docs/guides/cli)** (o setup instala se faltar — instruções por OS na skill `setup`). **Não precisa de Node** — o runtime mora no Supabase.
 
@@ -77,6 +78,8 @@ Conectado, você opera o WhatsApp **conversando com o Claude em linguagem natura
 | *"Procura onde falaram de orçamento"* | `search` |
 | *"Categoriza esse chat como cliente"* | `categorize_chat` |
 | *"Reage com 👍 na última do Pedro"* | `react` |
+| *"Manda um áudio pra Ana"* (texto vira voz, na voz default da instância) | `send_voice` |
+| *"Esse aí não precisa responder"* / *"me lembra semana que vem"* | `resolve_chat` (implícito — o agente entende o sinal) |
 
 Como são **ferramentas MCP** (não skills), funcionam igual em qualquer app de IA com suporte a MCP.
 
@@ -86,6 +89,22 @@ O agente escreve melhor em seu nome quando sabe **como cada pessoa te chama e co
 
 1. **Backfill (uma vez):** abra a pasta do repo no Claude Code e peça *"roda o backfill de voice profile"* — a skill [`voice-profile-backfill`](skills/voice-profile-backfill/SKILL.md) varre o seu histórico, monta um piloto pra você revisar e depois processa o resto.
 2. **Nutrição (rotina semanal local):** uma vez por semana, com o computador ligado, peça *"roda a nutrição de voice profile"*. O modo `--nutricao` pega só o delta da semana (contatos novos + perfis com mensagens novas) — leva minutos. Como os dados moram no **seu Supabase**, qualquer máquina serve; não precisa de servidor ligado 24/7. Se a semana pular, rode com `--days 14` que o delta cobre o acumulado.
+
+### A sua voz em áudio (opcional)
+
+Com uma conta [ElevenLabs](https://elevenlabs.io), *"manda um áudio pra Ana"* vira uma mensagem de voz de verdade (PTT). Duas escolhas na instalação:
+
+1. **Qual voz?** No [Voice Lab](https://elevenlabs.io/app/voice-lab), **clone a sua própria voz** (1-2 min de áudio limpo — o resultado é o áudio saindo como se fosse você) ou escolha uma voz do acervo.
+2. **Grave-a como default:** o voice ID escolhido vai em `wa_instance.default_voice_id` (a skill `/setup` conduz). A partir daí o `send_voice` usa essa voz sempre — sem precisar informar `voice_id` a cada pedido.
+
+### Como o agente decide "quem está devendo resposta"
+
+O `inbox` classifica cada conversa por `waiting_on` — quem falou por último define quem deve. As regras, já embutidas (você não precisa configurar nada):
+
+- **Grupos ficam fora** da semântica de pendência (qualquer membro falando marcaria você como devedor — ruído puro).
+- **Resolvido implícito:** ao sinalizar de qualquer jeito que uma conversa está encerrada (*"ignora esse"*, *"não precisa responder"*, *"já resolvi"*), o agente marca o chat como resolvido na hora — sem comando decorado. Se a pessoa mandar mensagem nova, o chat **reabre sozinho**.
+- **Snooze:** *"me lembra semana que vem"* esconde o chat até a data (ou até a pessoa responder — o que vier primeiro).
+- **Dormentes:** conversas paradas há 90+ dias não poluem o inbox por padrão (`include_dormant:true` mostra).
 
 ---
 
