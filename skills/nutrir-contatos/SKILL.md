@@ -19,6 +19,11 @@ Transforma conversa em memória de relacionamento: o que as pessoas contam no Wh
   `ig_nurture_state` no Instagram) — mensagem nunca é reprocessada. O cursor só avança
   DEPOIS dos eventos registrados (commit separado).
 - Máximo 3 observações por pessoa por rodada. Qualidade > cobertura.
+- Escrever no vault SEMPRE pelo id da entidade (`save_person` com `id`, `log_event`
+  com `entity_id`) — nunca gravar por telefone (bug conhecido de phoneVariants no
+  worker cria entidade duplicada).
+- `attributes` é JSON substituído por inteiro no `save_person`: ler o atual
+  (`get_entity`), mesclar no cliente e mandar o objeto completo.
 
 ## NUNCA
 
@@ -115,6 +120,28 @@ log_event(entity_id, kind='talked', source='whatsapp'|'instagram', ts=<ts da úl
 `kind='talked'` atualiza o `last_contacted` do contato. Grupo NÃO gera evento de
 interação (viraria spam de timeline) — grupo só gera observação (item a).
 
+**d) Campos estruturados e attributes** (padrão validado no backfill em massa de
+10/07/2026 — 2.179 contatos):
+
+- **Aniversário** → coluna nativa `birthday` do `save_person`, SÓ se vazia. Parsing
+  conservador: apenas dia+mês exatos declarados ("meu aniversário é 15/03");
+  aproximações ("por volta de", "início de março") NUNCA viram data. Sem ano
+  conhecido, formato `0000-MM-DD` (convenção do sync Google).
+- **Cidade / família / interesses** → `attributes.cidade` (string),
+  `attributes.familia` (string), `attributes.interesses` (array) — só se ausentes.
+  O dossiê renderiza os três como fields.
+- **Relação** (cliente/aluno/parceiro/família/pessoal/network/equipe/fornecedor):
+  atualizar `category` SÓ com evidência de confiança ALTA na conversa E quando a
+  category atual está vazia ou `lead`. Confiança média → `attributes.relacao_sugerida`
+  (dado interno de curadoria, não aparece no dossiê) — e só se ainda não houver
+  sugestão nem category firme.
+- **Grupos em comum** → `attributes.shared_groups`, array de `{chat_id, name}`
+  (o dossiê linka pra página do grupo quando ele existe no vault via
+  `whatsapp_links`). Contato apareceu num grupo novo no digest = mesclar a entrada.
+- **Instagram** → SÓ quando o PRÓPRIO contato declara o handle DELE na conversa
+  ("meu insta é @fulano", link do próprio perfil). NUNCA inferir de nome parecido,
+  post de terceiro ou link compartilhado.
+
 O que fica de fora está no bloco **NUNCA** acima — na dúvida entre registrar e pular,
 pular.
 
@@ -146,6 +173,11 @@ mensagens): adicionar UMA linha extra por entrada, com o MESMO `chat_id` e o
 o chat na próxima rodada.
 
 ## Passo 5 — Varredura de histórico (contato novo + backfill do passado)
+
+> **Backfill histórico em massa CONCLUÍDO em 10/07/2026** (pipeline de squads: 2.179
+> contatos nutridos com timeline/relação/perfil, 3.215 telefones marcados em
+> `nurture_backfill`). Na prática este passo agora serve quase só a CONTATOS NOVOS —
+> o lote diário de antigos tende a voltar vazio, o que é o esperado.
 
 Além do digest do dia, cada rodada faz a varredura COMPLETA de alguns contatos — uma
 única vez por contato, controlada pela tabela `nurture_backfill`:
