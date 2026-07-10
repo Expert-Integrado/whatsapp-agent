@@ -72,6 +72,9 @@ export interface OutboundMessage {
   isGroup?: boolean;
   delayTyping?: number;   // segundos (neutro; adapter converte)
   delayMessage?: number;  // segundos (neutro; adapter converte)
+  // Card de preview de link em msg de texto. Z-API: roteia pro send-link (exige a URL
+  // dentro do content — send-message garante isso). Evolution: liga linkPreview no sendText.
+  link?: { url: string; title?: string; description?: string; image?: string; previewSize?: "SMALL" | "MEDIUM" | "LARGE" };
 }
 
 export interface SendResult { providerMsgId: string }

@@ -1026,7 +1026,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       case "send": {
         const { to, content = "", type = "text", media_url, file_name, reply_to, allow_new = false,
           delay_typing, delay_message, mentions, mentions_everyone, force_send_after_inbound = false, instance, agent_name,
-          confirmed = false, humanize = true } = params;
+          confirmed = false, humanize = true, link } = params;
         if (!confirmed) return json({ blocked: true, needs_confirmation: true, to, content: content || "(midia)", type, ...(media_url && { media_url }), instruction: "Mostre destinatario + conteudo ao usuario e so reenvie com confirmed:true apos ele confirmar." });
         const effectiveDelayTyping = delay_typing !== undefined ? delay_typing : (humanize ? humanizedTypingSeconds(type, content) : undefined);
         const wantInstance = instance ? await resolveInstanceKey(instance) : null;
@@ -1085,6 +1085,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           quotedId = r.msg?.provider_msg_id ?? null;
         }
         const sendBody: any = { chat_id: resolved.chat_id, content, message_type: type, confirmed: true, agent_name: agent_name || "mcp-api", instance: targetInstance,
+          ...(link && { link }),
           ...(media_url && { media_url }), ...(file_name && { file_name }), ...(quotedId && { quoted_msg_id: quotedId }),
           ...(effectiveDelayTyping !== undefined && { delay_typing: effectiveDelayTyping }), ...(delay_message !== undefined && { delay_message }),
           ...(mentions?.length && { mentions }), ...(mentions_everyone && { mentions_everyone: true }) };
@@ -1458,6 +1459,19 @@ const TOOL_SCHEMAS = [
         mentions_everyone: { type: "boolean", description: "Menciona @todos no grupo" },
         force_send_after_inbound: { type: "boolean", description: "Ignora o gate de inbound recente nao respondido" },
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
+        link: {
+          type: "object",
+          description: "Card de preview de link (so type=text). Renderiza a URL como card com imagem/titulo/descricao. A URL e anexada ao content automaticamente se nao estiver nele.",
+          properties: {
+            url: { type: "string", description: "URL do link (obrigatoria)" },
+            title: { type: "string", description: "Titulo do card (default: a URL)" },
+            description: { type: "string", description: "Descricao curta do card" },
+            image: { type: "string", description: "URL da imagem do card (ex: og:image da pagina)" },
+            previewSize: { type: "string", enum: ["SMALL", "MEDIUM", "LARGE"], description: "Tamanho do card (default do provider)" },
+          },
+          required: ["url"],
+          additionalProperties: false,
+        },
       },
       required: ["to"],
       additionalProperties: false,

@@ -65,7 +65,7 @@ export class EvolutionProvider implements WaProvider {
       body = { number, sticker: msg.media?.url ?? msg.media?.bytes, ...this.opts(msg) };
     } else {
       path = "message/sendText";
-      body = { number, text: msg.content ?? "", ...this.opts(msg) };
+      body = { number, text: msg.content ?? "", ...(msg.link?.url ? { linkPreview: true } : {}), ...this.opts(msg) };
     }
     return Promise.resolve({ url: this.u(creds, path), method: "POST", headers, body: JSON.stringify(body) });
   }

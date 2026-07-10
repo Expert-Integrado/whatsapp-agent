@@ -286,8 +286,15 @@ FLUXO OBRIGATORIO (duas chamadas):
     mentions_everyone: z.boolean().optional().describe("Se true, menciona @todos no grupo."),
     force_send_after_inbound: z.boolean().default(false).describe("Se true, ignora o gate de inbound recente nao respondido. Default false: se a pessoa enviou algo nos ultimos 10 minutos e voce ainda nao respondeu, o send eh bloqueado pra evitar perder contexto. Use true APOS confirmar com Eric que ele quer enviar mesmo assim."),
     instance: z.string().optional().describe("De qual numero enviar (alias 'pessoal'/'profissional' ou instance_id). Padrao: herda a instancia do chat. Use pra FORCAR outro numero (ex: responder pelo profissional um chat que veio do pessoal). Obrigatorio em primeiro contato (allow_new) pois nao ha chat pra herdar."),
+    link: z.object({
+      url: z.string().url().describe("URL do link"),
+      title: z.string().optional().describe("Titulo do card (default: a URL)"),
+      description: z.string().optional().describe("Descricao curta do card"),
+      image: z.string().optional().describe("URL da imagem do card (ex: og:image da pagina)"),
+      previewSize: z.enum(["SMALL", "MEDIUM", "LARGE"]).optional().describe("Tamanho do card"),
+    }).optional().describe("Card de preview de link (so type=text). Renderiza a URL como card com imagem/titulo/descricao; a URL e anexada ao content automaticamente se nao estiver nele."),
   },
-  async ({ to, content, type, media_url, file_name, reply_to, confirmed, allow_new, humanize, delay_typing, delay_message, mentions, mentions_everyone, force_send_after_inbound, instance }) => {
+  async ({ to, content, type, media_url, file_name, reply_to, confirmed, allow_new, humanize, delay_typing, delay_message, mentions, mentions_everyone, force_send_after_inbound, instance, link }) => {
     if (!confirmed) {
       return {
         content: [{
@@ -320,6 +327,7 @@ FLUXO OBRIGATORIO (duas chamadas):
         to, content, type, allow_new, force_send_after_inbound, instance,
         confirmed: true, // gate de confirmacao ja passou aqui no MCP; a edge exige o flag
         agent_name: AGENT_NAME,
+        ...(link && { link }),
         ...(media_url && { media_url }),
         ...(file_name && { file_name }),
         ...(reply_to && { reply_to }),

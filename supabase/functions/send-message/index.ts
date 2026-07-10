@@ -100,6 +100,7 @@ Deno.serve(async (req) => {
     agent_request_id, agent_name, confirmed,
     delay_typing, delay_message,  // simulacao humana — repassa pra Z-API se presentes
     mentions, mentions_everyone,  // mencoes em grupos
+    link,                         // card de preview de link (so message_type=text)
     instance: instanceKey,        // alias ('pessoal'/'profissional') ou instance_id; default se ausente
   } = body;
 
@@ -113,6 +114,18 @@ Deno.serve(async (req) => {
   }
   if (["image", "document", "video", "audio", "ptt"].includes(message_type) && !media_url) {
     return json({ error: `media_url obrigatorio para message_type=${message_type}` }, 400);
+  }
+
+  // Card de preview de link: so em texto; url obrigatoria. A Z-API exige a URL dentro do
+  // proprio message — garante aqui (provider-neutro) pra nao depender do caller.
+  let finalContent: string | undefined = content ?? undefined;
+  if (link !== undefined) {
+    if (message_type !== "text") return json({ error: "link (preview) so e suportado em message_type=text" }, 400);
+    if (typeof link?.url !== "string" || !/^https?:\/\//.test(link.url)) {
+      return json({ error: "link.url obrigatoria (http/https) para card de preview" }, 400);
+    }
+    if (finalContent && !finalContent.includes(link.url)) finalContent = `${finalContent}\n\n${link.url}`;
+    if (!finalContent) finalContent = link.url;
   }
 
   // Server-side guard: requer confirmed=true (defense-in-depth do gate do MCP)
@@ -158,7 +171,7 @@ Deno.serve(async (req) => {
     instance_id: instance.instance_id,
     provider_msg_id: `pending-${tempId}`,
     chat_id, direction: "sent", from_me: true,
-    message_type, content: content ?? null,
+    message_type, content: finalContent ?? null,
     quoted_msg_id: quoted_msg_id ?? null,
     send_status: "pending", sent_by_agent: true,
     sent_by_agent_name: agent_name ?? "unknown",
@@ -195,15 +208,16 @@ Deno.serve(async (req) => {
       chatId: chat_id,
       phone,
       type: message_type,
-      content: content ?? undefined,
+      content: finalContent,
       media: media_url ? { url: media_url, fileName: file_name } : undefined,
-      caption: content ?? undefined,
+      caption: finalContent,
       quotedProviderId: resolvedQuotedId,
       mentions: mentionedList,
       mentionsEveryone: !!mentions_everyone,
       isGroup: !!chat.is_group,
       delayTyping: delay_typing,
       delayMessage: delay_message,
+      link: link ?? undefined,
     };
     const built = await provider.buildSend(instance, outbound);
     const r = await fetch(built.url, { method: built.method, headers: built.headers, body: built.body });

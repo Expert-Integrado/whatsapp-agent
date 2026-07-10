@@ -180,6 +180,22 @@ export class ZapiProvider implements WaProvider {
 
     switch (msg.type) {
       case "text":
+        if (msg.link?.url) {
+          // Card com preview: send-link exige title/description/image e a URL dentro do message.
+          endpoint = `${base}/send-link`;
+          zapiBody = {
+            phone,
+            message: withMentions(msg.content ?? ""),
+            linkUrl: msg.link.url,
+            title: msg.link.title ?? msg.link.url,
+            linkDescription: msg.link.description ?? "",
+            image: msg.link.image ?? "",
+            ...(msg.link.previewSize && { linkType: msg.link.previewSize }),
+            ...(resolvedQuotedId && { messageId: resolvedQuotedId }),
+            ...(mentionedList.length && { mentioned: mentionedList }),
+          };
+          break;
+        }
         endpoint = `${base}/send-text`;
         zapiBody = {
           phone,
