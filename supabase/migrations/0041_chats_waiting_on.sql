@@ -25,10 +25,11 @@ ALTER TABLE public.chats
 CREATE INDEX IF NOT EXISTS idx_chats_waiting_on
   ON public.chats (waiting_on, last_message_at);
 
--- 2. Views ganham waiting_on APPENDED no fim. CREATE OR REPLACE exige as colunas
---    existentes na MESMA ordem — por isso a lista explicita, na ordem em que o
---    c.* da 0028 expandiu (conferida via pg_get_viewdef em prod 10/07/2026).
-CREATE OR REPLACE VIEW public.v_chats_with_contact AS
+-- 2. Views ganham waiting_on APPENDED no fim. DROP+CREATE (nao CREATE OR REPLACE):
+--    a view da 0028 expandiu c.* na ordem FISICA da tabela, que difere entre prod
+--    e instalacao do zero — REPLACE exige a mesma ordem e quebrava install limpa.
+DROP VIEW IF EXISTS public.v_chats_with_contact;
+CREATE VIEW public.v_chats_with_contact AS
 SELECT c.chat_id, c.chat_name, c.is_group, c.is_community, c.is_announcement,
        c.phone, c.profile_thumbnail, c.member_count, c.description,
        c.last_message_at, c.created_at, c.updated_at,
@@ -39,7 +40,8 @@ SELECT c.chat_id, c.chat_name, c.is_group, c.is_community, c.is_announcement,
        c.waiting_on
 FROM public.chats c;
 
-CREATE OR REPLACE VIEW public.v_chats_with_categories AS
+DROP VIEW IF EXISTS public.v_chats_with_categories;
+CREATE VIEW public.v_chats_with_categories AS
 SELECT c.instance_id, c.chat_id, c.chat_name, c.is_group, c.last_message_at,
        c.last_received_at, c.last_sent_at, c.linked_pipedrive_person_id,
        COALESCE(array_agg(cat.slug ORDER BY cat.slug) FILTER (WHERE cat.slug IS NOT NULL), ARRAY[]::TEXT[]) AS category_slugs,
@@ -49,6 +51,10 @@ FROM public.chats c
 LEFT JOIN public.chat_categories cc ON cc.instance_id = c.instance_id AND cc.chat_id = c.chat_id
 LEFT JOIN public.categories cat ON cat.id = cc.category_id
 GROUP BY c.instance_id, c.chat_id;
+
+-- DROP+CREATE reseta grants (mesma licao da 0044).
+GRANT SELECT ON public.v_chats_with_contact, public.v_chats_with_categories
+  TO anon, authenticated, service_role;
 
 NOTIFY pgrst, 'reload schema';
 COMMIT;
