@@ -234,7 +234,7 @@ import { assertEquals } from "jsr:@std/assert";
 import { digitsFromJid, isGroupJid, isLidJid } from "../jid.ts";
 
 Deno.test("digitsFromJid extrai dígitos antes do @", () => {
-  assertEquals(digitsFromJid("558192030166@s.whatsapp.net"), "558192030166");
+  assertEquals(digitsFromJid("5511999998888@s.whatsapp.net"), "5511999998888");
   assertEquals(digitsFromJid("120363012345678901@g.us"), "120363012345678901");
   assertEquals(digitsFromJid("5511999998888"), "5511999998888");
 });
@@ -817,9 +817,9 @@ Deno.test("evo.normalizeInbound: messages.upsert texto → message neutro", asyn
   assertEquals(ev.kind, "message");
   if (ev.kind === "message") {
     assertEquals(ev.messageType, "text");
-    assertEquals(ev.chatId, "558192030166");          // dígitos do remoteJid/remoteJidAlt
+    assertEquals(ev.chatId, "5511999998888");         // dígitos do remoteJid/remoteJidAlt
     assertEquals(ev.fromMe, false);
-    assertEquals(ev.senderName, "Asafe Silva");        // pushName
+    assertEquals(ev.senderName, "João Silva");         // pushName
     assertEquals(ev.providerMsgId, "3EB041E7E371837D3775CB");
     assertEquals(ev.content, /* texto do fixture */ ev.content);
     assertEquals(ev.media, null);

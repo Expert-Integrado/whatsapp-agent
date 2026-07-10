@@ -49,11 +49,20 @@ O Claude conduz o setup pra você; você só fornece as credenciais.
 
 ```text
 Instale o WhatsApp Agent neste repositório, do zero, seguindo a skill setup
-(.claude/skills/setup/SKILL.md). Use o Supabase CLI pra tudo do Supabase — supabase link,
-db push, secrets set, functions deploy. Conduza passo a passo, pedindo uma credencial
-de cada vez e guardando-as SO no .env local (gitignored) — nunca commite. No fim, me dê
-a URL da mcp-api + a MCP_API_KEY pra eu conectar o MCP no meu harness, e rode o smoke
-test (a tool `status`).
+(.claude/skills/setup/SKILL.md) e o protocolo de onboarding do CLAUDE.md. Antes de
+começar, verifique os pré-requisitos (Supabase CLI + contas). Use o Supabase CLI pra
+tudo do Supabase — supabase link, db push, secrets set, functions deploy. Pra CADA
+etapa de navegador (criar conta/instância na Z-API e conectar o número via QR code,
+criar o projeto Supabase e gerar PAT/chaves, criar a API key da OpenAI, escolher a voz
+na ElevenLabs), pergunte com botões (AskUserQuestion): "Essa etapa é no navegador.
+Quer que eu faça pra você?" — rota default: você faz via Playwright MCP (se faltar,
+instale com: claude mcp add playwright -- npx -y @playwright/mcp@latest); alternativas:
+Claude in Chrome, ou me guiar no passo a passo manual. Login é sempre comigo — nunca
+peça senha no chat. Valide cada credencial com uma chamada real antes de seguir.
+Conduza passo a passo, pedindo uma credencial de cada vez e guardando-as SÓ no .env
+local (gitignored) — nunca commite. No fim, me dê a URL da mcp-api + a MCP_API_KEY pra
+eu conectar o MCP no meu harness, rode o teste E2E (a tool `status`) e me entregue um
+resumo do que ficou configurado.
 ```
 
 > As credenciais dos serviços (Z-API, OpenAI) vão pros **secrets do Supabase** (`supabase secrets set`) — é lá que as Edge Functions as leem. O `.env` local é só o veículo do setup; o runtime não depende dele.
@@ -64,10 +73,10 @@ test (a tool `status`).
 
 Pra **operar**, conecte o **MCP remoto** (`https://SEU_PROJECT_REF.supabase.co/functions/v1/mcp-api`) no seu harness, uma vez. É um servidor MCP padrão — funciona em **qualquer app de IA com suporte a MCP**, não só no Claude. Dois caminhos de autenticação, conforme o app:
 
-- **Claude Code** (inclui a aba **Code** do Desktop) — header key: o `.mcp.json` deste repo já tem o esqueleto; troque o ref e ponha a `MCP_API_KEY` no env.
+- **Claude Code** (inclui a aba **Code** do Desktop) — header key: o `.mcp.json` deste repo já tem o esqueleto; defina `WHATSAPP_AGENT_MCP_URL` (a URL da sua `mcp-api`) e `MCP_API_KEY` no ambiente.
 - **Claude Desktop (chat) ou Claude Web** (claude.ai) — **OAuth**: Settings → Connectors → *Add custom connector* → cole a URL → em *Advanced settings*, informe o **Client ID + Client Secret** que o setup gerou pra você → conectar. (A tela de Connectors não aceita header custom; o OAuth é auto-aprovado, sem tela extra.)
 
-Conectado, você opera o WhatsApp **conversando com o Claude em linguagem natural** — sem comandos nem skills pra instalar. O **MCP expõe ~20 ferramentas** que o Claude aciona conforme o que você pede:
+Conectado, você opera o WhatsApp **conversando com o Claude em linguagem natural** — sem comandos nem skills pra instalar. O **MCP expõe 23 ferramentas** que o Claude aciona conforme o que você pede:
 
 | Você diz… | Tool |
 |---|---|
@@ -141,7 +150,7 @@ flowchart LR
 Três serviços, com o Supabase como **runtime**:
 
 - **Provedor WhatsApp** — gateway do WhatsApp. Pode ser **Z-API** (hospedado, pago) ou **Evolution API** (self-hosted, open-source), selecionável por instância. Recebe as suas mensagens (webhook → `process-webhook`) e envia as respostas via `wa-proxy`.
-- **Supabase** — o coração **e o runtime**. Postgres (mensagens, chats, contatos, categorias), Storage (6 buckets de mídia), Edge Functions (Deno) e `pg_cron` (transcrição a cada 2 min, limpeza). Entre as functions está a **`mcp-api`: o MCP server falando HTTP** — é ela que expõe as ~20 tools. 31 migrations versionadas.
+- **Supabase** — o coração **e o runtime**. Postgres (mensagens, chats, contatos, categorias), Storage (6 buckets de mídia), Edge Functions (Deno) e `pg_cron` (transcrição a cada 2 min, limpeza). Entre as functions está a **`mcp-api`: o MCP server falando HTTP** — é ela que expõe as 23 tools. 43 migrations versionadas.
 - **OpenAI** — Whisper, pra transcrever os áudios.
 - **Harness** — qualquer Claude (Code, Desktop ou Web) conecta na `mcp-api`. O Claude Code usa **`x-mcp-key`**; o chat do Desktop/Web usa **OAuth** (a própria `mcp-api` é o Authorization Server — confidential client + PKCE, auto-aprovado, sem tela). Não há processo local: o MCP roda no Supabase.
 

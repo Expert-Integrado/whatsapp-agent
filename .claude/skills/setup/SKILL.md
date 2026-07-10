@@ -348,7 +348,7 @@ O backend esta no ar. Escolha o caminho conforme o harness:
 1. Settings -> Connectors -> **Add custom connector**.
 2. URL: `https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/mcp-api`
 3. **Advanced settings** -> OAuth Client ID = `<OAUTH_CLIENT_ID>`, OAuth Client Secret = `<OAUTH_CLIENT_SECRET>` (passo 6).
-4. Conectar -> o Claude roda o fluxo OAuth (auto-aprovado, sem tela) -> as ~20 tools aparecem.
+4. Conectar -> o Claude roda o fluxo OAuth (auto-aprovado, sem tela) -> as 23 tools aparecem.
 
 ---
 

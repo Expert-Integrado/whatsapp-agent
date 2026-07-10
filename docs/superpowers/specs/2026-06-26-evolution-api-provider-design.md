@@ -2,7 +2,7 @@
 
 **Data:** 2026-06-26
 **Status:** Aprovado para implementação (pendente revisão final do spec)
-**Autor:** Asafe Silva + Claude
+**Autor:** Expert Integrado + Claude
 
 ---
 
