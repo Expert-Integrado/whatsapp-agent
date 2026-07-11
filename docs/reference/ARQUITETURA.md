@@ -11,11 +11,12 @@ Todas rodam no Supabase (Deno). `verify_jwt` vem de [`config.toml`](../../supaba
 | Função | Gatilho | `verify_jwt` | O que faz |
 |---|---|---|---|
 | [`process-webhook`](../../supabase/functions/process-webhook/index.ts) | Webhook do provedor | **false** | **Entrada principal.** Recebe o webhook, detecta o provider, autentica (TOFU), grava em `webhook_events_raw`, normaliza e persiste em `chats`/`messages`/`message_media`/etc. |
-| [`mcp-api`](../../supabase/functions/mcp-api/index.ts) | MCP (Claude) | **false** | **Gateway MCP-over-HTTP.** Expõe ~20 tools, autentica via `x-mcp-key` ou OAuth. Ver [MCP.md](MCP.md) |
+| [`mcp-api`](../../supabase/functions/mcp-api/index.ts) | MCP (Claude) | **false** | **Gateway MCP-over-HTTP.** Expõe 26 tools, autentica via `x-mcp-key` ou OAuth. Ver [MCP.md](MCP.md) |
 | [`send-message`](../../supabase/functions/send-message/index.ts) | MCP / HTTP | true | **Saída principal.** Envia texto/mídia via provider, com `confirmed=true` + rate-limit + atualização de `messages` |
 | [`send-voice`](../../supabase/functions/send-voice/index.ts) | MCP / HTTP | true | Gera TTS (ElevenLabs, OGG/Opus) → Storage → envia como PTT |
 | [`wa-proxy`](../../supabase/functions/wa-proxy/index.ts) | MCP / HTTP | true | Ações agnósticas (status, chats, contacts, reações, deletes, ops de grupo) via allowlist de 18 actions + auditoria em `wa_action_log` |
 | [`transcribe-queue`](../../supabase/functions/transcribe-queue/index.ts) | cron (2 min) + trigger (`?id=`) | true | Transcreve áudios `ptt`/`audio` privados via OpenAI Whisper; grava em `messages.content` |
+| [`dispatch-scheduled`](../../supabase/functions/dispatch-scheduled/index.ts) | cron (1 min) | true | Dispara as sequências de mensagens agendadas vencidas (`scheduled_sequences`), item a item na ordem, reusando `send-message`/`send-voice`/`wa-proxy`. Budget de 50 s/invocação com resume via `items_sent`; item falhou → aborta o resto (`status='failed'`) |
 | [`retry-media`](../../supabase/functions/retry-media/index.ts) | cron (15 min) | true | Re-tenta downloads de mídia com `download_status='pending'` |
 | [`cleanup-media`](../../supabase/functions/cleanup-media/index.ts) | cron (diário) | true | Remove mídia pesada antiga do Storage |
 | [`sync-google-contacts`](../../supabase/functions/sync-google-contacts/index.ts) | — | true | Legado (sync Google Contacts; tabelas removidas na 0023) |
@@ -125,7 +126,7 @@ O `pg_cron` não fala HTTP diretamente: usa a function `call_edge_function(path)
 ```mermaid
 flowchart LR
     CRON["pg_cron"] -->|call_edge_function| V["Vault (project_url, service_role_key)"]
-    V -->|net.http_post Bearer| EF["transcribe-queue / retry-media / cleanup-media"]
+    V -->|net.http_post Bearer| EF["transcribe-queue / retry-media / cleanup-media / dispatch-scheduled"]
 ```
 
 ---

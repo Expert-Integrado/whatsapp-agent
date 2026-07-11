@@ -175,6 +175,9 @@ Origem: [0018](../../supabase/migrations/0018_zapi_action_log.sql) (como `zapi_a
 ### `voice_guide` — guia de voz do dono
 Origem: [0030](../../supabase/migrations/0030_voice_guide.sql). Markdown que descreve como o dono se comunica, consumido pela `mcp-api`. Single-tenant: uma linha global (`instance_id` NULL) ou uma por instância. UNIQUE em `COALESCE(instance_id,'__global__')`.
 
+### `scheduled_sequences` — sequências de mensagens agendadas
+Origem: [0047](../../supabase/migrations/0047_scheduled_sequences.sql). Uma linha = uma sequência de 1..10 mensagens (`items` JSONB — shape espelha os params de `send`/`send_voice`/`send-poll`) agendada pra envio único futuro em um chat/instância. Criada pela tool `schedule` da `mcp-api` (gate `confirmed` satisfeito na criação); drenada pelo worker [`dispatch-scheduled`](../../supabase/functions/dispatch-scheduled/index.ts) (cron 1/min). Campos-chave: `scheduled_at` (timestamptz), `status` (`pending`/`processing`/`sent`/`failed`/`canceled`), `items_sent` (cursor de progresso/resume — em falha, o item que falhou é `items[items_sent]`), `error`, `started_at`/`finished_at`. Índice parcial `idx_scheduled_sequences_due` (`scheduled_at WHERE status='pending'`) pro worker. Itens imutáveis: editar = `cancel_scheduled` + `schedule` de novo.
+
 ### Tabelas removidas
 - `presence_events` — removida em [0022](../../supabase/migrations/0022_drop_presence_events.sql) (≈216 MB de dado morto + cron de limpeza).
 - `contacts` e `oauth_tokens` — removidas em [0023](../../supabase/migrations/0023_remove_google_contacts_sync.sql) (sync do Google Contacts nunca foi populado). O CASCADE quebrou views, recriadas em [0024](../../supabase/migrations/0024_recreate_v_chats_with_contact.sql)/[0026](../../supabase/migrations/0026_recreate_v_messages_with_sender.sql).
@@ -228,6 +231,7 @@ Todos rodam em **UTC**. Os que chamam Edge Functions usam `call_edge_function` +
 | `cleanup-heavy-media` | `30 3 * * *` | `→ /functions/v1/cleanup-media` (áudio > 30 dias) — [0005](../../supabase/migrations/0005_pg_cron_jobs.sql) |
 | `zapi-action-log-partition-create` | `0 3 25 * *` | Cria partição do mês seguinte — [0019](../../supabase/migrations/0019_zapi_action_log_cron.sql) |
 | `zapi-action-log-partition-drop` | `0 4 1 * *` | Dropa partições > 90 dias — [0019](../../supabase/migrations/0019_zapi_action_log_cron.sql) |
+| `dispatch-scheduled` | `* * * * *` | `→ /functions/v1/dispatch-scheduled` (sequências de mensagens agendadas vencidas) — [0047](../../supabase/migrations/0047_scheduled_sequences.sql) |
 
 > **Removidos:** `cleanup-presence-events` (0022) e `sync-google-contacts` (0023).
 
@@ -294,6 +298,13 @@ Todos rodam em **UTC**. Os que chamam Edge Functions usam `call_edge_function` +
 | 0038 | `voice_profile_como_chamo` | `voice_profile.como_chamo` |
 | 0039 | `social_graph_state` | Cursor do grafo social de interações |
 | 0040 | `provider_neutralization` | Rename `zapi_*`→`wa_*`, `token`→`auth_token`; `provider`/`base_url`; views shim de compat |
+| 0041 | `chats_waiting_on` | `waiting_on` computado no banco (o inbox filtrava em memória) |
+| 0042 | `contact_profile_cache` | Cache de recado (`about`) + perfil business em `chats` (refresh lazy TTL 7d) |
+| 0043 | `backfill_direction_timestamps` | Backfill de `last_received_at`/`last_sent_at` do histórico pré-0008 |
+| 0044 | `waiting_on_groups_off` | Grupo nunca entra na semântica de "quem espera resposta" |
+| 0045 | `chat_resolve_snooze` | Modelo Zendesk: `resolved_at`/`snooze_until` em `chats` (tool `resolve_chat`) |
+| 0046 | `instance_default_voice` | `wa_instance.default_voice_id` (voz TTS default por instância) |
+| 0047 | `scheduled_sequences` | Tabela `scheduled_sequences` + cron `dispatch-scheduled` (1 min) — agendamento de sequências de mensagens |
 
 ---
 
