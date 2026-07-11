@@ -200,7 +200,12 @@ export class EvolutionProvider implements WaProvider {
       const ev: InboundEvent = {
         kind: "message",
         chatId,
-        chatName: d.pushName ?? null,
+        // pushName e o AUTOR da mensagem, nunca o chat: em fromMe e o dono da
+        // instancia ("Asafe Silva"/"Você"), em grupo e o participante que falou.
+        // Usa-lo como chatName renomeava contatos pro nome do dono e grupos pro
+        // ultimo participante (28 chats corrompidos em 11/07/2026). So vale em
+        // 1-1 recebida; nome de grupo vem do fetchGroups/sync_groups.
+        chatName: (k.fromMe || isGroup) ? null : (d.pushName ?? null),
         isGroup,
         fromMe: k.fromMe ?? false,
         senderPhone,
