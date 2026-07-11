@@ -176,7 +176,7 @@ Origem: [0018](../../supabase/migrations/0018_zapi_action_log.sql) (como `zapi_a
 Origem: [0030](../../supabase/migrations/0030_voice_guide.sql). Markdown que descreve como o dono se comunica, consumido pela `mcp-api`. Single-tenant: uma linha global (`instance_id` NULL) ou uma por instância. UNIQUE em `COALESCE(instance_id,'__global__')`.
 
 ### `scheduled_sequences` — sequências de mensagens agendadas
-Origem: [0047](../../supabase/migrations/0047_scheduled_sequences.sql). Uma linha = uma sequência de 1..10 mensagens (`items` JSONB — shape espelha os params de `send`/`send_voice`/`send-poll`) agendada pra envio único futuro em um chat/instância. Criada pela tool `schedule` da `mcp-api` (gate `confirmed` satisfeito na criação); drenada pelo worker [`dispatch-scheduled`](../../supabase/functions/dispatch-scheduled/index.ts) (cron 1/min). Campos-chave: `scheduled_at` (timestamptz), `status` (`pending`/`processing`/`sent`/`failed`/`canceled`), `items_sent` (cursor de progresso/resume — em falha, o item que falhou é `items[items_sent]`), `error`, `started_at`/`finished_at`. Índice parcial `idx_scheduled_sequences_due` (`scheduled_at WHERE status='pending'`) pro worker. Itens imutáveis: editar = `cancel_scheduled` + `schedule` de novo.
+Origem: [0049](../../supabase/migrations/0049_scheduled_sequences.sql). Uma linha = uma sequência de 1..10 mensagens (`items` JSONB — shape espelha os params de `send`/`send_voice`/`send-poll`) agendada pra envio único futuro em um chat/instância. Criada pela tool `schedule` da `mcp-api` (gate `confirmed` satisfeito na criação); drenada pelo worker [`dispatch-scheduled`](../../supabase/functions/dispatch-scheduled/index.ts) (cron 1/min). Campos-chave: `scheduled_at` (timestamptz), `status` (`pending`/`processing`/`sent`/`failed`/`canceled`), `items_sent` (cursor de progresso/resume — em falha, o item que falhou é `items[items_sent]`), `error`, `started_at`/`finished_at`. Índice parcial `idx_scheduled_sequences_due` (`scheduled_at WHERE status='pending'`) pro worker. Itens imutáveis: editar = `cancel_scheduled` + `schedule` de novo.
 
 ### Tabelas removidas
 - `presence_events` — removida em [0022](../../supabase/migrations/0022_drop_presence_events.sql) (≈216 MB de dado morto + cron de limpeza).
@@ -231,7 +231,7 @@ Todos rodam em **UTC**. Os que chamam Edge Functions usam `call_edge_function` +
 | `cleanup-heavy-media` | `30 3 * * *` | `→ /functions/v1/cleanup-media` (áudio > 30 dias) — [0005](../../supabase/migrations/0005_pg_cron_jobs.sql) |
 | `zapi-action-log-partition-create` | `0 3 25 * *` | Cria partição do mês seguinte — [0019](../../supabase/migrations/0019_zapi_action_log_cron.sql) |
 | `zapi-action-log-partition-drop` | `0 4 1 * *` | Dropa partições > 90 dias — [0019](../../supabase/migrations/0019_zapi_action_log_cron.sql) |
-| `dispatch-scheduled` | `* * * * *` | `→ /functions/v1/dispatch-scheduled` (sequências de mensagens agendadas vencidas) — [0047](../../supabase/migrations/0047_scheduled_sequences.sql) |
+| `dispatch-scheduled` | `* * * * *` | `→ /functions/v1/dispatch-scheduled` (sequências de mensagens agendadas vencidas) — [0049](../../supabase/migrations/0049_scheduled_sequences.sql) |
 
 > **Removidos:** `cleanup-presence-events` (0022) e `sync-google-contacts` (0023).
 
@@ -304,7 +304,10 @@ Todos rodam em **UTC**. Os que chamam Edge Functions usam `call_edge_function` +
 | 0044 | `waiting_on_groups_off` | Grupo nunca entra na semântica de "quem espera resposta" |
 | 0045 | `chat_resolve_snooze` | Modelo Zendesk: `resolved_at`/`snooze_until` em `chats` (tool `resolve_chat`) |
 | 0046 | `instance_default_voice` | `wa_instance.default_voice_id` (voz TTS default por instância) |
-| 0047 | `scheduled_sequences` | Tabela `scheduled_sequences` + cron `dispatch-scheduled` (1 min) — agendamento de sequências de mensagens |
+| 0047 | `categories_alinhamento_vault` | Seed de categorias de segmento alinhadas ao vault de contatos (`aluno`, `network`, `vip`) |
+| 0048 | `categoria_mapear` | Seed da categoria operacional `mapear` (grupo alimenta o mapeamento de contatos) |
+| 0049 | `scheduled_sequences` | Tabela `scheduled_sequences` + cron `dispatch-scheduled` (1 min) — agendamento de sequências de mensagens |
+| 0050 | `enable_rls_remaining` | RLS nas tabelas que ficaram sem (advisor): `lid_mapping`, `wa_action_log` (+partições), `nurture_*`, `social_graph_state` |
 
 ---
 

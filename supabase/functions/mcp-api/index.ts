@@ -1112,7 +1112,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       }
 
       case "schedule": {
-        // Agendamento de sequencia de mensagens (0047). Valida tudo AQUI na criacao;
+        // Agendamento de sequencia de mensagens (0049). Valida tudo AQUI na criacao;
         // o worker dispatch-scheduled so drena a fila e reusa as edges de envio.
         // Gate confirmed e satisfeito na criacao — o disparo roda confirmed=true.
         const { to, at, items, instance, agent_name, confirmed = false } = params;

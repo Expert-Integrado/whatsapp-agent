@@ -10,7 +10,7 @@ Agendamento de mensagens: programe o envio futuro de uma **sequência** de mensa
 - **Tool `schedule`** — agenda a sequência pra envio único futuro (`at` em ISO-8601 com offset). Gate de confirmação na **criação** (resumo → `confirmed:true`); o disparo depois roda sem novo gate e ignora o bloqueio de inbound recente (já autorizado). Pausa humanizada entre itens (ou `delay_after` 0–300 s por item). Item `voice` gera o TTS na hora do disparo; `media_url` precisa estar válida no disparo (aviso automático pra signed URLs do Storage).
 - **Tools `list_scheduled` / `cancel_scheduled`** — acompanhamento (status, progresso `items_sent/total`, erro) e cancelamento enquanto `pending`. Sem edição: cancelar + agendar de novo.
 - **Edge Function `dispatch-scheduled`** (cron `pg_cron` a cada 1 min) — drena `scheduled_sequences` vencidas reusando `send-message`/`send-voice`/`wa-proxy` (mesmo caminho de provider, rate-limit e `confirmed` do envio normal). Budget de 50 s por invocação com **resume** automático via cursor `items_sent`; item que falha aborta os restantes com erro registrado.
-- **Migration `0047_scheduled_sequences`** — tabela `scheduled_sequences` (itens em JSONB, status `pending/processing/sent/failed/canceled`, índice parcial de vencidas) + job `dispatch-scheduled`.
+- **Migration `0049_scheduled_sequences`** (nasceu como 0047; renumerada por colisão com `categories_alinhamento_vault`) — tabela `scheduled_sequences` (itens em JSONB, status `pending/processing/sent/failed/canceled`, índice parcial de vencidas) + job `dispatch-scheduled`.
 
 ### Notes
 - Precisão de disparo: minuto a minuto (cron 1/min), não segundo exato.

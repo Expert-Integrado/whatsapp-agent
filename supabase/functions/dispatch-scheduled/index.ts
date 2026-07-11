@@ -1,6 +1,6 @@
 // dispatch-scheduled — worker que dispara as sequencias de mensagens agendadas
 // (tabela scheduled_sequences, tool `schedule` da mcp-api). Cron: a cada 1 min
-// (0047). Envia item a item NA ORDEM reusando as edges de envio existentes
+// (0049). Envia item a item NA ORDEM reusando as edges de envio existentes
 // (send-message / send-voice / wa-proxy), que ja resolvem provider, instancia,
 // rate limit e gate confirmed.
 //
