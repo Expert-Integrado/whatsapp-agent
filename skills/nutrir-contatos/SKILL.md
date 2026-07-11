@@ -1,6 +1,6 @@
 ---
 name: nutrir-contatos
-description: Rotina diária de nutrição do vault de contatos (expert-contacts) a partir das conversas do WhatsApp E do Instagram. Lê as mensagens novas do dia (digest incremental dos dois canais), extrai fatos ditos pelas pessoas ("mudei de casa", "estou com dificuldade em X") e interações reais, registra na timeline de quem JÁ é contato e mescla contexto durável na visão geral do perfil. Contato novo no vault dispara varredura do histórico completo dele (backfill), e o passado dos contatos existentes é varrido em lotes diários. TRIGGER quando o dono pedir "nutre os contatos", "roda a nutrição", ou no agendamento diário (fim do dia). NÃO dispara pra ler/responder uma conversa específica, nem pra importar contatos novos (a nutrição nunca cria contato).
+description: Rotina diária de nutrição do vault de contatos (expert-contacts) a partir das conversas do WhatsApp E do Instagram. Lê as mensagens novas do dia (digest incremental dos dois canais), extrai fatos ditos pelas pessoas ("mudei de casa", "estou com dificuldade em X") e interações reais, registra na timeline de quem JÁ é contato e mescla contexto durável na visão geral do perfil. Contato novo no vault dispara varredura do histórico completo dele (backfill), e o passado dos contatos existentes é varrido em lotes diários. TRIGGER quando o dono pedir "nutre os contatos", "roda a nutrição", ou no agendamento diário (fim do dia). NÃO dispara pra ler/responder uma conversa específica, nem pra importar contatos novos (a nutrição não cria contato comum; a ÚNICA criação permitida é o contato MAPEADO do Passo 3.5, em grupo com categoria mapear ligada).
 ---
 
 # Nutrir contatos a partir das conversas (WhatsApp + Instagram)
@@ -27,8 +27,9 @@ Transforma conversa em memória de relacionamento: o que as pessoas contam no Wh
 
 ## NUNCA
 
-- Criar contato novo (nem quando o remetente parece importante — pulado vira sugestão
-  no relatório, o dono decide criar).
+- Criar contato novo de categoria comum (nem quando o remetente parece importante —
+  pulado vira sugestão no relatório, o dono decide criar). Única exceção: contato
+  MAPEADO via Passo 3.5, com os dois gates satisfeitos.
 - Apagar ou sobrescrever informação existente no perfil (a visão geral só CRESCE por
   mescla; campo estruturado como e-mail/empresa/cargo só é preenchido se estiver VAZIO).
 - Registrar: opinião de terceiro sobre a pessoa, fofoca, conteúdo encaminhado, piada ou
@@ -145,6 +146,39 @@ interação (viraria spam de timeline) — grupo só gera observação (item a).
 O que fica de fora está no bloco **NUNCA** acima — na dúvida entre registrar e pular,
 pular.
 
+## Passo 3.5 — Grupos mapeados (contatos que o dono nunca falou)
+
+> Decisão do dono em 10/07/2026 (nota `fh39xlmxi973` no Brain): grupos de networking
+> marcados como "mapear" geram contato de categoria `mapeado` pra quem ainda não está
+> no vault — um sub-vault desligado, invisível nas buscas, esperando o dia em que o
+> dono encontra a pessoa.
+
+**Gates — os DOIS precisam passar, senão pular este passo em silêncio (1 linha no
+relatório) e seguir com o comportamento padrão:**
+
+1. **Grupo ligado**: o chat do grupo tem a categoria de chat `mapear` (consultar
+   `v_chats_with_categories` via REST: `category_slugs` contém `mapear`). Grupo sem
+   ela = ignorado por este passo (remetente sem match continua pulado em silêncio).
+2. **Worker pronto**: `GET /canon` do expert-contacts retorna `mapeado` em
+   `contact_categories`. Enquanto o deploy não sai (task `9zfjcquprh03`), este passo
+   inteiro fica dormente.
+
+**Pra cada remetente SEM match no vault em grupo ligado:**
+
+- Aplicar os MESMOS critérios do Passo 3a: só interessa fato digno de histórico
+  (marco de vida/negócio, dificuldade explícita, relação com o dono). **Sem fato
+  digno = não cria nada** — quem só deu bom dia nunca ganha entidade.
+- Com fato digno: conferir de novo `get_contact_by_phone` (o lookup inclui mapeados)
+  e só então criar:
+  ```
+  save_person(name=<sender_name do digest; sem nome: 'Mapeado +<fone formatado>'>,
+              phones=[sender_phone], category='mapeado', source='whatsapp')
+  ```
+  Depois registrar o(s) fato(s) por `entity_id` (Passo 3a) e `attributes.shared_groups`
+  (Passo 3d). Regras de privacidade e máximo de observações valem igual.
+- Cap de segurança: no máximo 15 mapeados novos por rodada — excedente vira lista no
+  relatório (o dono decide se roda de novo).
+
 ## Passo 4 — Avançar os cursores
 
 Montar `/tmp/nurture-commit.json` com UMA linha por chat processado (inclusive os que
@@ -210,7 +244,9 @@ um só (WhatsApp + Instagram somados) — priorizar contatos novos de qualquer c
 
 Resumo curto pro dono: N chats lidos (WhatsApp + Instagram, discriminados), M eventos
 registrados (1 linha por evento: quem + o quê), K perfis enriquecidos (visão
-geral/backfill), quem foi pulado por não ser contato — com o fato que se perdeu, como
+geral/backfill), contatos MAPEADOS criados (1 linha cada: nome/fone + grupo + fato —
+ou "passo dormente: worker sem categoria mapeado" enquanto o gate 2 falhar), quem foi
+pulado por não ser contato — com o fato que se perdeu, como
 sugestão de contato novo pro dono aprovar — e quantos contatos ainda faltam no
 backfill. Se o repo do Instagram não estava disponível, avisar que a rodada cobriu só
 o WhatsApp.
