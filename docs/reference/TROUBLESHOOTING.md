@@ -122,6 +122,16 @@ Se faltar algum, a função apenas emite `NOTICE` e retorna NULL (não quebra, m
 
 ---
 
+## 8. Mensagem chega com `�` no lugar dos acentos
+
+**Sintoma:** o texto enviado aparece no WhatsApp com `�` exatamente onde havia letra acentuada (`função` → `fun��o`); todo o resto (URLs, pontuação) chega intacto.
+
+**Causa provável:** o payload foi montado fora do fluxo MCP — ex.: `curl` com o JSON inline no shell do **Windows**. A passagem de argumento converte o texto pra code page ANSI (CP1252, 1 byte por acento) e a API lê o body como UTF-8: cada byte inválido vira U+FFFD (`�`). Pelo cliente MCP isso não acontece (JSON UTF-8 de ponta a ponta).
+
+**Resolver:** use as tools MCP pra operar; se precisar chamar a `mcp-api` por `curl` (debug), grave o JSON num arquivo UTF-8 e envie com `curl --data-binary @arquivo` — nunca texto acentuado inline no comando.
+
+---
+
 ## Verificação rápida de saúde
 
 ```sql

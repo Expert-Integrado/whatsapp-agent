@@ -56,6 +56,8 @@ Categoria: **read** (consulta), **write** (altera metadados no banco), **destruc
 
 > Quase todas aceitam `instance` (alias `pessoal`/`profissional` ou `instance_id`) para escolher de qual número operar em setups multi-instância.
 
+> **Menção em grupos LID:** quando os participantes aparecem com LID (ex.: `sender_phone` de 14-15 dígitos nas mensagens do grupo), o `mentions` do `send` aceita o JID completo — `mentions: ["<lid>@lid"]` com o token `@<lid>` no texto renderiza a menção clicável nos dois providers.
+
 ---
 
 ## Gates de segurança
