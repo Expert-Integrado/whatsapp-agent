@@ -196,6 +196,26 @@ Deno.test("evo.normalizeInbound: group-participants.update ADD → evento group_
   }
 });
 
+Deno.test("evo.normalizeInbound: group-participants.update com participants objeto (shape atual) → phones extraídos do id", async () => {
+  const grp = {
+    event: "group-participants.update",
+    instance: "you_casa",
+    data: {
+      id: "120363419574585270@g.us",
+      action: "remove",
+      author: "89408434901109@lid",
+      participants: [{ id: "89408434901109@lid", admin: null }],
+    },
+  };
+  const evs = await e.normalizeInbound(grp, creds);
+  assertEquals(evs.length, 1);
+  if (evs[0].kind === "group_participant") {
+    assertEquals(evs[0].action, "remove");
+    assertEquals(evs[0].chatId, "120363419574585270@g.us");
+    assertEquals(evs[0].phones, ["89408434901109"]);
+  }
+});
+
 Deno.test("evo.normalizeInbound: evento desconhecido → []", async () => {
   const unknown = { event: "some.unknown", instance: "you_casa", data: {} };
   const evs = await e.normalizeInbound(unknown, creds);
