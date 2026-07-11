@@ -240,7 +240,11 @@ export class EvolutionProvider implements WaProvider {
     if (event === "group-participants.update") {
       const action = mapGroupAction(d.action ?? "");
       if (!action) return [];
-      const phones: string[] = (d.participants ?? []).map((p: string) => digitsFromJid(p));
+      // Evolution atual manda participants como objetos {id: "...@lid", admin} (Baileys);
+      // versões antigas mandavam strings — aceitar os dois.
+      const phones: string[] = (d.participants ?? [])
+        .map((p: string | { id?: string }) => digitsFromJid(typeof p === "string" ? p : p?.id ?? ""))
+        .filter(Boolean);
       return [{ kind: "group_participant", chatId: d.id ?? "", action, phones }];
     }
 
