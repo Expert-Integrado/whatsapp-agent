@@ -179,6 +179,37 @@ relatório) e seguir com o comportamento padrão:**
 - Cap de segurança: no máximo 15 mapeados novos por rodada — excedente vira lista no
   relatório (o dono decide se roda de novo).
 
+## Passo 3.6 — Reuniões do dia (Meeting Hub)
+
+> Backfill histórico de reuniões CONCLUÍDO em 11/07/2026 (176 reuniões desde 30/05,
+> 49 eventos gravados). Este passo cobre só o delta diário.
+
+Gate: `MEETINGHUB_SUPABASE_URL`/`MEETINGHUB_SERVICE_ROLE_KEY` no `mcp/.env`. Ausentes =
+pular com 1 linha no relatório.
+
+```bash
+node scripts/meetings-digest.mjs digest --out /tmp/meetings-digest.json
+```
+
+Pra cada reunião do digest (já vem só com `resumo` de extração pronto):
+
+- Participante EXTERNO apenas: ignorar time (`@expertintegrado` no email, Eric) e bots
+  de gravação (Fireflies, tldv, "Meeting Assistant", "Usuário").
+- Resolver contra o vault: email exato primeiro; senão nome completo ÚNICO
+  (`search_contacts`). Sem match = pular (lead de CRM não vira contato — vai como
+  contagem no relatório; com a política de mapeados ativa, ver Passo 3.5, também não:
+  reunião não é grupo mapeado).
+- Registrar UM evento por contato por reunião:
+  ```
+  log_event(entity_id, kind='meeting', source='manual', ts=<started_at>,
+            context='Reunião Zoom: <topic>. <resumo em até 2 frases, SEM valores/proposta>')
+  ```
+- Ao final, avançar o cursor com o `started_at` da ÚLTIMA reunião processada:
+  ```bash
+  node scripts/meetings-digest.mjs commit --ts "<started_at>"
+  ```
+  (mesma regra dos outros cursores: só avança DEPOIS dos eventos gravados)
+
 ## Passo 4 — Avançar os cursores
 
 Montar `/tmp/nurture-commit.json` com UMA linha por chat processado (inclusive os que

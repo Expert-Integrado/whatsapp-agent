@@ -14,3 +14,4 @@ supabase/.temp/
 # Playwright MCP cache + accidental Windows redirect artifacts (added 2026-05-28)
 .playwright-mcp/
 Ctmp*
+.meetings-cursor.json
