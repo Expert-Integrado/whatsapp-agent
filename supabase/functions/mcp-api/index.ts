@@ -1098,14 +1098,14 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       }
 
       case "send_voice": {
-        const { to, text, voice_id, model_id, stability, similarity_boost, style, speed, instance, agent_name, confirmed = false } = params;
-        if (!confirmed) return json({ blocked: true, needs_confirmation: true, to, voice_id, text, instruction: "Mostre destinatario + texto + voice_id ao usuario e so reenvie com confirmed:true apos ele confirmar." });
+        const { to, text, profile, voice_id, model_id, stability, similarity_boost, style, speed, instance, agent_name, confirmed = false } = params;
+        if (!confirmed) return json({ blocked: true, needs_confirmation: true, to, ...(profile && { profile }), voice_id, text, instruction: "Mostre destinatario + perfil/voz + texto ao usuario e so reenvie com confirmed:true apos ele confirmar." });
         const resolved = await resolveChat(to, instance);
         if (resolved.error) return json({ ok: false, error: resolved.error });
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
         const targetInstance = (instance ? await resolveInstanceKey(instance) : null) ?? resolved.instance_id;
         const vbody: any = { chat_id: resolved.chat_id, text, voice_id, confirmed: true, agent_name: agent_name || "mcp-api", agent_request_id: crypto.randomUUID(), instance: targetInstance,
-          ...(model_id && { model_id }), ...(stability !== undefined && { stability }), ...(similarity_boost !== undefined && { similarity_boost }), ...(style !== undefined && { style }), ...(speed !== undefined && { speed }) };
+          ...(profile && { profile }), ...(model_id && { model_id }), ...(stability !== undefined && { stability }), ...(similarity_boost !== undefined && { similarity_boost }), ...(style !== undefined && { style }), ...(speed !== undefined && { speed }) };
         const { status, data } = await callEdge("send-voice", vbody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-voice ${status}`, detail: data }, status);
         return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance });
@@ -1579,18 +1579,19 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "send_voice",
-    description: "Gera audio TTS (ElevenLabs) e envia como mensagem de voz (PTT). FLUXO OBRIGATORIO: 1a chamada SEM confirmed (bloqueia); 2a com confirmed:true apos o usuario confirmar. voice_id e opcional: sem ele usa a voz default da instancia (voz do dono).",
+    description: "Gera audio TTS (ElevenLabs) e envia como mensagem de voz (PTT). SO quando o usuario pediu audio EXPLICITAMENTE (texto e o canal default). PREFIRA `profile` (catalogo no banco, settings travados server-side): eric-casual (DEFAULT conversa em curso), eric-casual-animado (comemoracao: parabens/bora/fechou), eric-profissional (lead novo, decisor, 1a abordagem, B2B), eric-prospeccao (massa), eric-v2 (alternativa), jully (assistente — audio pro proprio dono). Perfil bloqueado/inexistente = erro com a lista dos ativos; voz '1309'/'13/09' bloqueada ate calibrar; rotulo vago ('voz antiga') = listar candidatos ao usuario, nao adivinhar. HUMANIZACAO e server-side pelo perfil — envie texto LIMPO com acentuacao correta (retorno traz text_spoken). FLUXO OBRIGATORIO: 1a chamada SEM confirmed (bloqueia e mostra resumo); 2a com confirmed:true apos o usuario confirmar; EXCECAO audio pro proprio dono ja pedido explicito = confirmed:true direto. Legacy: voice_id explicito com settings manuais; sem profile e sem voice_id usa a voz default da instancia. Max ~150 palavras (~60s).",
     inputSchema: {
       type: "object",
       properties: {
         to: { type: "string", description: "Destinatario: chat_id ou phone" },
-        text: { type: "string", description: "Texto a converter em fala (max 5000)" },
-        voice_id: { type: "string", description: "ElevenLabs voice ID (opcional — default: voz da instancia)" },
-        model_id: { type: "string", description: "Modelo ElevenLabs (default eleven_turbo_v2_5)" },
-        stability: { type: "number", description: "0-1 (default 0.45)" },
-        similarity_boost: { type: "number", description: "0-1 (default 0.75)" },
-        style: { type: "number", description: "0-1 (default 0.30)" },
-        speed: { type: "number", description: "0.7-1.2 (default 0.95)" },
+        text: { type: "string", description: "Texto a converter em fala (max 5000). Limpo, com acentos — a humanizacao oral e server-side" },
+        profile: { type: "string", description: "Perfil do catalogo voice_profiles (ex: eric-casual). Trava voice_id/model/settings server-side. Nao combinar com voice_id" },
+        voice_id: { type: "string", description: "ElevenLabs voice ID (legado/avancado — prefira profile)" },
+        model_id: { type: "string", description: "Modelo ElevenLabs (default eleven_turbo_v2_5; ignorado com profile)" },
+        stability: { type: "number", description: "0-1 (default 0.45; ignorado com profile)" },
+        similarity_boost: { type: "number", description: "0-1 (default 0.75; ignorado com profile)" },
+        style: { type: "number", description: "0-1 (default 0.30; ignorado com profile)" },
+        speed: { type: "number", description: "0.7-1.2 (default 0.95; ignorado com profile)" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
       },

@@ -105,6 +105,7 @@ Com uma conta [ElevenLabs](https://elevenlabs.io), *"manda um áudio pra Ana"* v
 
 1. **Qual voz?** No [Voice Lab](https://elevenlabs.io/app/voice-lab), **clone a sua própria voz** (1-2 min de áudio limpo — o resultado é o áudio saindo como se fosse você) ou escolha uma voz do acervo.
 2. **Grave-a como default:** o voice ID escolhido vai em `wa_instance.default_voice_id` (a skill `/setup` conduz). A partir daí o `send_voice` usa essa voz sempre — sem precisar informar `voice_id` a cada pedido.
+3. **Catálogo de perfis (opcional, migration 0051):** a tabela `voice_profiles` guarda perfis nomeados (ex.: `casual`, `profissional`, `animado`) com voice ID + settings **travados no servidor** e nível de humanização oral (`forte`/`leve`/`nenhum` — contrações tipo "tá/cê/pra" aplicadas antes do TTS). O agente escolhe o perfil pelo contexto do pedido (*"manda um áudio profissional pro cliente"*) e passa só `profile` — o servidor resolve o resto, então nenhum agente consegue inventar settings errados. Perfil sem voice ID cadastrado é recusado com o motivo.
 
 ### Como o agente decide "quem está devendo resposta"
 

@@ -10,12 +10,15 @@
 // ElevenLabs output_format=opus_48000_32 entrega OGG/Opus mono 48kHz direto
 // (sem ffmpeg server-side). Provider WA com type=ptt exibe onda real em PTT.
 //
-// Skill `voz` no claude-code VPS contem catalog de perfis (voice_id + settings)
-// — esta function NAO conhece perfis, recebe parametros explicitos.
+// Perfis de voz (0051, absorve a skill pessoal:voz): param `profile` resolve o
+// catalogo em voice_profiles e TRAVA voice_id/model/settings server-side; a
+// humanizacao oral (nivel do perfil) roda aqui antes do TTS. Caminho legado
+// (voice_id explicito + settings manuais) segue funcionando sem perfil.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { checkSendRateLimit } from "../_shared/rate-limit.ts";
 import { getProvider, type InstanceCreds } from "../_shared/wa/index.ts";
+import { humanize, type HumanizeLevel } from "../_shared/humanize.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -79,7 +82,8 @@ Deno.serve(async (req) => {
   const {
     chat_id,           // ex: "5511999998888" (privado) ou "120363...-group" (grupo)
     text,              // texto a converter em fala
-    voice_id,          // ElevenLabs voice ID (skill voz fornece)
+    profile: profileKey, // perfil do catalogo voice_profiles (trava voice/settings server-side)
+    voice_id,          // ElevenLabs voice ID explicito (caminho legado, sem perfil)
     model_id = "eleven_turbo_v2_5",
     stability = 0.45,
     similarity_boost = 0.75,
@@ -100,6 +104,12 @@ Deno.serve(async (req) => {
   // (wa_instance.default_voice_id, migration 0046) — resolvido apos carregar a instancia.
   if (voice_id !== undefined && typeof voice_id !== "string") {
     return json({ error: "voice_id deve ser string" }, 400);
+  }
+  if (profileKey !== undefined && (typeof profileKey !== "string" || !/^[a-z0-9-]{1,64}$/.test(profileKey))) {
+    return json({ error: "profile invalido (minusculas/numeros/hifen)" }, 400);
+  }
+  if (profileKey && voice_id) {
+    return json({ error: "passe profile OU voice_id, nao os dois (profile trava o voice_id do catalogo)" }, 400);
   }
   if (!/^opus_48000_(32|64|96|128|192)$/.test(output_format)) {
     return json({ error: "output_format invalido (deve ser opus_48000_XX)" }, 400);
@@ -151,12 +161,50 @@ Deno.serve(async (req) => {
     : await instSel.eq("is_default", true).maybeSingle();
   if (!instanceRow) return json({ error: "instancia WA nao encontrada" }, 500);
 
-  // Resolve voz: explicita > default da instancia > env DEFAULT_VOICE_ID.
+  // Resolve PERFIL (voice_profiles, 0051): voice_id/model/settings TRAVADOS pelo catalogo.
+  let profileRow: {
+    profile: string; voice_id: string | null; model_id: string;
+    stability: number | null; similarity_boost: number | null; style: number | null; speed: number | null;
+    humanize: HumanizeLevel; is_active: boolean; blocked_reason: string | null;
+  } | null = null;
+  if (profileKey) {
+    const { data: pr } = await supabase
+      .from("voice_profiles")
+      .select("profile, voice_id, model_id, stability, similarity_boost, style, speed, humanize, is_active, blocked_reason")
+      .eq("profile", profileKey)
+      .maybeSingle();
+    if (!pr) {
+      const { data: actives } = await supabase
+        .from("voice_profiles").select("profile").eq("is_active", true).order("profile");
+      return json({
+        error: `perfil de voz '${profileKey}' nao existe no catalogo`,
+        perfis_ativos: (actives ?? []).map((a) => a.profile),
+      }, 404);
+    }
+    if (!pr.is_active || !pr.voice_id) {
+      return json({
+        error: `perfil de voz '${profileKey}' esta bloqueado`,
+        reason: pr.blocked_reason ??
+          (pr.voice_id ? "perfil inativo" : "voice_id a preencher — confirmar com o dono antes do 1o uso"),
+      }, 403);
+    }
+    profileRow = pr;
+  }
+
+  // Resolve voz: perfil > explicita > default da instancia > env DEFAULT_VOICE_ID.
   const effectiveVoiceId: string | null =
-    (voice_id as string | undefined) ?? instanceRow.default_voice_id ?? Deno.env.get("DEFAULT_VOICE_ID") ?? null;
+    profileRow?.voice_id ?? (voice_id as string | undefined) ?? instanceRow.default_voice_id ?? Deno.env.get("DEFAULT_VOICE_ID") ?? null;
   if (!effectiveVoiceId) {
     return json({ error: "voice_id obrigatorio (instancia sem default_voice_id configurado)" }, 400);
   }
+  // Settings efetivos: com perfil, SO os do catalogo (NULL = default da edge); sem perfil, os do request.
+  const effModelId = profileRow ? profileRow.model_id : model_id;
+  const effStability = profileRow ? (profileRow.stability !== null ? Number(profileRow.stability) : 0.45) : stability;
+  const effSimilarity = profileRow ? (profileRow.similarity_boost !== null ? Number(profileRow.similarity_boost) : 0.75) : similarity_boost;
+  const effStyle = profileRow ? (profileRow.style !== null ? Number(profileRow.style) : 0.30) : style;
+  const effSpeed = profileRow ? (profileRow.speed !== null ? Number(profileRow.speed) : 0.95) : speed;
+  // Humanizacao oral server-side (nivel do perfil); sem perfil = texto literal (compat legado).
+  const spokenText = humanize(text, profileRow?.humanize ?? "nenhum");
   const creds: InstanceCreds = {
     provider: instanceRow.provider,
     instance_id: instanceRow.instance_id,
@@ -197,7 +245,7 @@ Deno.serve(async (req) => {
       agent_request_id,
       action: "send-voice",
       category: "destructive",
-      params: { chat_id, voice_id: effectiveVoiceId, model_id, stability, similarity_boost, style, speed, output_format, text_length: text.length },
+      params: { chat_id, voice_id: effectiveVoiceId, ...(profileKey && { profile: profileKey, humanize: profileRow?.humanize }), model_id: effModelId, stability: effStability, similarity_boost: effSimilarity, style: effStyle, speed: effSpeed, output_format, text_length: spokenText.length },
       method: "POST",
       agent_name: sanitizedAgentName,
       instance_id: instance.instance_id,
@@ -214,13 +262,14 @@ Deno.serve(async (req) => {
       provider_msg_id: `pending-${tempId}`,
       chat_id, direction: "sent", from_me: true,
       message_type: "ptt",
-      content: text,  // texto original como caption/conteudo
+      content: spokenText,  // o que foi FALADO (humanizado quando ha perfil)
       send_status: "pending",
       sent_by_agent: true,
       sent_by_agent_name: sanitizedAgentName,
       agent_request_id,
       message_ts: new Date().toISOString(),
-      raw_payload: { source: "send-voice", voice_id: effectiveVoiceId, text },
+      raw_payload: { source: "send-voice", voice_id: effectiveVoiceId, text: spokenText,
+        ...(profileKey && { profile: profileKey }), ...(spokenText !== text && { text_original: text }) },
     })
     .select("id")
     .single();
@@ -237,9 +286,9 @@ Deno.serve(async (req) => {
   try {
     // ─── 10. ElevenLabs TTS → OGG/Opus
     const elPayload = {
-      text,
-      model_id,
-      voice_settings: { stability, similarity_boost, style, speed, use_speaker_boost },
+      text: spokenText,
+      model_id: effModelId,
+      voice_settings: { stability: effStability, similarity_boost: effSimilarity, style: effStyle, speed: effSpeed, use_speaker_boost },
     };
     const elAbort = AbortSignal.timeout(ELEVENLABS_TIMEOUT_MS);
     const elRes = await fetch(
@@ -298,6 +347,8 @@ Deno.serve(async (req) => {
       storage_path: storagePath,
       audio_bytes: audioBuf.length,
       duration_ms: durationMs,
+      ...(profileKey && { profile: profileKey }),
+      ...(spokenText !== text && { text_spoken: spokenText }),
     };
 
     // ─── 15. Audit log final

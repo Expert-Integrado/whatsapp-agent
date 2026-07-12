@@ -367,60 +367,63 @@ FLUXO OBRIGATORIO (duas chamadas):
 
 // ─── 3.5. send_voice — TTS via ElevenLabs + envio Z-API PTT ──────────────────
 //
-// Wrapper thin que chama edge function send-voice. Edge faz: TTS via ElevenLabs
-// (OGG/Opus mono 48kHz output_format=opus_48000_32), upload pro Storage, signed
-// URL TTL 1h, Z-API send-audio com waveform=true (PTT).
+// Wrapper thin que chama a mcp-api (case send_voice) → edge send-voice. Edge faz:
+// resolve perfil no catalogo voice_profiles (0051, settings TRAVADOS server-side),
+// humanizacao oral pelo nivel do perfil, TTS via ElevenLabs (OGG/Opus mono 48kHz),
+// upload pro Storage, signed URL e provider WA com waveform=true (PTT).
 //
-// Skill `voz` (catalog de perfis: eric-casual, eric-profissional, jully etc.)
-// fornece voice_id + settings (stability/similarity_boost/style/speed) — esta
-// tool e a engine de envio, nao conhece perfis.
+// A antiga skill 'voz' foi ABSORVIDA (12/07/2026): o catalogo agora vive no banco
+// e a decisao de perfil e feita por esta description — nao ha mais skill.
 server.tool(
   "send_voice",
   `Gera audio TTS via ElevenLabs e envia como mensagem de voz (PTT) via WhatsApp.
 
-QUANDO USAR:
-- Eric pediu audio explicitamente ("manda audio pro X", "responde em audio", "manda mensagem de voz")
-- Skill 'voz' resolveu qual voice_id + settings usar baseado no perfil (eric-casual, eric-profissional, jully etc.)
+QUANDO USAR: SO quando o user pediu audio EXPLICITAMENTE ("manda audio", "responde em audio", "mensagem de voz", "/voz"). Texto e o canal default — nunca gerar audio "porque combina".
 
-ARQUITETURA:
-- Skill 'voz' = catalog de perfis (voice_id + settings travados)
-- send_voice = engine de envio (gera, faz upload, manda Z-API)
+PERFIS (catalogo voice_profiles no banco; settings TRAVADOS server-side — prefira profile a voice_id):
+- eric-casual — DEFAULT. Conversa em curso, cliente atual, tom dia-a-dia
+- eric-casual-animado — comemoracao (parabens, bora, fechou, deu certo, arrasou)
+- eric-profissional — lead novo, decisor senior, primeira abordagem, B2B serio
+- eric-prospeccao — prospeccao em massa (config legada)
+- eric-v2 — versao alternativa Eric v2.0 (uso pontual)
+- jully — assistente; audio pro proprio Eric
+Perfil inexistente/bloqueado = erro com a lista dos ativos. Voz "1309" (qualquer rotulo: 13/09, versao de setembro...) esta BLOQUEADA ate calibrar. Rotulo vago ("voz antiga do Eric") = NAO adivinhar: listar candidatos (eric-v2, eric-prospeccao, 1309) e o user aponta.
 
-PARAMETROS:
-- to: chat_id ou phone do destinatario (mesmo formato de send())
-- text: texto que vai virar fala. Max 5000 chars
-- voice_id: ElevenLabs voice ID (skill voz fornece — NAO inventar)
-- stability, similarity_boost, style, speed: settings travados por perfil na skill voz
-- humanize: nao implementado nesta tool (skill voz pode aplicar antes de chamar)
+HUMANIZACAO: server-side conforme o perfil (forte/leve/nenhum). NAO pre-humanizar — envie texto LIMPO com acentuacao correta; o retorno traz text_spoken (o que foi falado). Max ~150 palavras (~60s de audio).
+
+DESTINATARIO: mesmo formato do send(); chat confirmado por read/inbox — NUNCA inferir numero. Retorno ambiguous = mostrar candidatos ao user, nao escolher sozinho.
 
 FLUXO OBRIGATORIO (duas chamadas):
-1a chamada — SEM confirmed: mostre ao usuario destinatario + texto + voice_id + perfil, aguarde confirmacao
-2a chamada — COM confirmed: true: so apos confirmacao explicita do user
+1a chamada — SEM confirmed: mostre ao user destinatario + perfil + texto, aguarde confirmacao explicita
+2a chamada — COM confirmed: true
+EXCECAO: audio pro proprio Eric que ele ja pediu explicito → confirmed: true direto.
+
+LEGACY: voice_id explicito + settings manuais ainda funciona (sem humanizacao); sem profile e sem voice_id = voz default da instancia.
 
 IDEMPOTENCY: tool gera agent_request_id automatico. 2x mesma call em 24h retorna cache.
-
-ATENCAO QUOTA: ElevenLabs tem quota mensal. Verificar saldo antes de bursts grandes.`,
+ATENCAO QUOTA: ElevenLabs tem quota mensal (nao ha tool de saldo) — antes de burst de 3+ audios, avisar que a quota precisa ser conferida no dashboard.`,
   {
     to: z.string().describe("Destinatario: chat_id ou phone (igual a send())"),
-    text: z.string().min(1).max(5000).describe("Texto a converter em fala"),
-    voice_id: z.string().describe("ElevenLabs voice ID (skill voz fornece)"),
-    model_id: z.string().default("eleven_turbo_v2_5").describe("Modelo ElevenLabs (default: eleven_turbo_v2_5)"),
-    stability: z.number().min(0).max(1).default(0.45).describe("ElevenLabs stability (0-1)"),
-    similarity_boost: z.number().min(0).max(1).default(0.75).describe("ElevenLabs similarity_boost (0-1)"),
-    style: z.number().min(0).max(1).default(0.30).describe("ElevenLabs style (0-1)"),
-    speed: z.number().min(0.7).max(1.2).default(0.95).describe("ElevenLabs speed (0.7-1.2)"),
+    text: z.string().min(1).max(5000).describe("Texto a converter em fala. Limpo, com acentos — humanizacao e server-side"),
+    profile: z.string().optional().describe("Perfil do catalogo (ex: eric-casual). Trava voice_id/model/settings server-side. Nao combinar com voice_id"),
+    voice_id: z.string().optional().describe("ElevenLabs voice ID (legado/avancado — prefira profile)"),
+    model_id: z.string().optional().describe("Modelo ElevenLabs (default eleven_turbo_v2_5; ignorado com profile)"),
+    stability: z.number().min(0).max(1).optional().describe("0-1 (default 0.45; ignorado com profile)"),
+    similarity_boost: z.number().min(0).max(1).optional().describe("0-1 (default 0.75; ignorado com profile)"),
+    style: z.number().min(0).max(1).optional().describe("0-1 (default 0.30; ignorado com profile)"),
+    speed: z.number().min(0.7).max(1.2).optional().describe("0.7-1.2 (default 0.95; ignorado com profile)"),
     confirmed: z.boolean().default(false).describe("OBRIGATORIO true. So passe true apos confirmacao explicita do user."),
     instance: z.string().optional().describe("De qual numero enviar (alias 'pessoal'/'profissional' ou instance_id). Padrao: herda do chat."),
   },
-  async ({ to, text, voice_id, model_id, stability, similarity_boost, style, speed, confirmed, instance }) => {
+  async ({ to, text, profile, voice_id, model_id, stability, similarity_boost, style, speed, confirmed, instance }) => {
     if (!confirmed) {
       return {
         content: [{ type: "text", text: [
           "BLOQUEADO: confirmacao pendente.",
           "",
           `Audio pra: ${to}`,
-          `Voice ID : ${voice_id}`,
-          `Settings : stab=${stability} sim=${similarity_boost} style=${style} speed=${speed}`,
+          `Perfil   : ${profile ?? voice_id ?? "(voz default da instancia)"}`,
+          ...(profile ? [] : [`Settings : stab=${stability ?? 0.45} sim=${similarity_boost ?? 0.75} style=${style ?? 0.30} speed=${speed ?? 0.95}`]),
           `Texto    : "${text}"`,
           "",
           'Apos confirmacao explicita do user, chame novamente com confirmed: true.',
@@ -430,7 +433,7 @@ ATENCAO QUOTA: ElevenLabs tem quota mensal. Verificar saldo antes de bursts gran
     }
     try {
       const r = await callApi("send_voice", {
-        to, text, voice_id, model_id, stability, similarity_boost, style, speed, instance,
+        to, text, profile, voice_id, model_id, stability, similarity_boost, style, speed, instance,
         confirmed: true, // gate de confirmacao ja passou aqui no MCP; a edge exige o flag
         agent_name: AGENT_NAME,
       });
