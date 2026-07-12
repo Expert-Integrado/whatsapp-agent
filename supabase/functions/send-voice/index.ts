@@ -155,7 +155,7 @@ Deno.serve(async (req) => {
   if (instanceKey !== undefined && (typeof instanceKey !== "string" || !/^[A-Za-z0-9_-]+$/.test(instanceKey))) {
     return json({ error: "instance invalido" }, 400);
   }
-  const instSel = supabase.from("wa_instance").select("provider, instance_id, base_url, auth_token, client_token, alias, default_voice_id");
+  const instSel = supabase.from("wa_instance").select("provider, instance_id, base_url, auth_token, client_token, alias, default_voice_id, humanize_enabled");
   const { data: instanceRow } = (typeof instanceKey === "string" && instanceKey.length > 0)
     ? await instSel.or(`alias.eq.${instanceKey},instance_id.eq.${instanceKey}`).limit(1).maybeSingle()
     : await instSel.eq("is_default", true).maybeSingle();
@@ -204,7 +204,11 @@ Deno.serve(async (req) => {
   const effStyle = profileRow ? (profileRow.style !== null ? Number(profileRow.style) : 0.30) : style;
   const effSpeed = profileRow ? (profileRow.speed !== null ? Number(profileRow.speed) : 0.95) : speed;
   // Humanizacao oral server-side (nivel do perfil); sem perfil = texto literal (compat legado).
-  const spokenText = humanize(text, profileRow?.humanize ?? "nenhum");
+  // wa_instance.humanize_enabled=false (escolha do onboarding, 0052) sobrepoe o
+  // nivel do perfil — a instalacao decide se a oralizacao roda, o perfil so o nivel.
+  const humanizeEnabled = instanceRow.humanize_enabled !== false;
+  const effHumanize: HumanizeLevel = humanizeEnabled ? (profileRow?.humanize ?? "nenhum") : "nenhum";
+  const spokenText = humanize(text, effHumanize);
   const creds: InstanceCreds = {
     provider: instanceRow.provider,
     instance_id: instanceRow.instance_id,
@@ -245,7 +249,7 @@ Deno.serve(async (req) => {
       agent_request_id,
       action: "send-voice",
       category: "destructive",
-      params: { chat_id, voice_id: effectiveVoiceId, ...(profileKey && { profile: profileKey, humanize: profileRow?.humanize }), model_id: effModelId, stability: effStability, similarity_boost: effSimilarity, style: effStyle, speed: effSpeed, output_format, text_length: spokenText.length },
+      params: { chat_id, voice_id: effectiveVoiceId, ...(profileKey && { profile: profileKey, humanize: effHumanize }), ...(!humanizeEnabled && { humanize_enabled: false }), model_id: effModelId, stability: effStability, similarity_boost: effSimilarity, style: effStyle, speed: effSpeed, output_format, text_length: spokenText.length },
       method: "POST",
       agent_name: sanitizedAgentName,
       instance_id: instance.instance_id,

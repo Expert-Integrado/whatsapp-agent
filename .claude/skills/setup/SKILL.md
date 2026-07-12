@@ -193,6 +193,24 @@ curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/dat
 
 > Sem `default_voice_id`, o `send_voice` exige `voice_id` explicito a cada chamada. Precedencia: `voice_id` do request > `default_voice_id` da instancia > env `DEFAULT_VOICE_ID`.
 
+#### Humanizacao oral (escolha obrigatoria quando ha voz)
+
+Os audios podem sair com **oralizacao paulista** — o texto e adaptado antes do TTS pra soar falado, nao lido ("implementar" vira "implementá", "está" vira "tá", "para" vira "pra"). O nivel (leve/forte) vem do perfil de voz (`voice_profiles.humanize`), mas **ligar ou desligar e escolha da instalacao** — o operador nao tem interface, entao a decisao e AQUI, no onboarding.
+
+Pergunte via AskUserQuestion: **"Quer que os audios saiam humanizados (jeito falado, ex.: 'implementá', 'tá', 'pra') ou com o texto literal?"**
+
+- **Humanizado (default):** soa mais natural em conversa informal. Nao precisa gravar nada (`humanize_enabled` ja nasce `true`).
+- **Texto literal:** recomendado pra tom 100% formal/corporativo. Grave a escolha:
+
+```bash
+SQL="UPDATE wa_instance SET humanize_enabled = false WHERE instance_id = '<INSTANCE_ID>';"
+curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"
+```
+
+> `humanize_enabled = false` forca texto literal no `send-voice` da instancia inteira, sobrepondo o nivel de qualquer perfil de voz. Da pra mudar de ideia depois com o mesmo UPDATE (`true`/`false`).
+
 ---
 
 ## 3. Secrets das edge functions

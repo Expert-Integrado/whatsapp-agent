@@ -86,6 +86,8 @@ Uma linha por número de WhatsApp conectado. É a tabela que decide **qual prove
 | `phone_connected` | TEXT | Número conectado |
 | `alias` | TEXT UNIQUE | Nome legível (ex.: `pessoal`, `profissional`) (0027) |
 | `is_default` | BOOLEAN | Instância padrão (usada no backfill da 0028) (0027) |
+| `default_voice_id` | TEXT | Voz TTS default do `send-voice` quando o request não especifica (0046) |
+| `humanize_enabled` | BOOLEAN | Escolha do onboarding: `false` desliga a humanização oral do `send-voice` na instância, sobrepondo o nível do perfil (0052) |
 | `is_active`, `last_connected_at`, `last_disconnected_at` | — | Estado da conexão |
 | `created_at`, `updated_at` | TIMESTAMPTZ | Trigger `set_updated_at` em `updated_at` |
 
@@ -308,6 +310,8 @@ Todos rodam em **UTC**. Os que chamam Edge Functions usam `call_edge_function` +
 | 0048 | `categoria_mapear` | Seed da categoria operacional `mapear` (grupo alimenta o mapeamento de contatos) |
 | 0049 | `scheduled_sequences` | Tabela `scheduled_sequences` + cron `dispatch-scheduled` (1 min) — agendamento de sequências de mensagens |
 | 0050 | `enable_rls_remaining` | RLS nas tabelas que ficaram sem (advisor): `lid_mapping`, `wa_action_log` (+partições), `nurture_*`, `social_graph_state` |
+| 0051 | `voice_profiles` | Tabela `voice_profiles`: catálogo de perfis de voz TTS — `send-voice` resolve `profile` e trava voice/settings server-side; `humanize` = nível de oralização |
+| 0052 | `instance_humanize_toggle` | `wa_instance.humanize_enabled` (escolha do onboarding): `false` força texto literal no `send-voice`, sobrepondo o nível do perfil |
 
 ---
 
