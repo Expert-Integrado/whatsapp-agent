@@ -331,6 +331,7 @@
       <a href="#voz">Voz</a>
       <a href="#seguranca">Segurança</a>
       <a href="#instalacao">Instalação</a>
+      <a href="#novidades">Novidades</a>
     </div>
   </div>
 </nav>
@@ -453,7 +454,7 @@
       <!-- mcp-api -->
       <rect x="500" y="150" width="160" height="80" rx="12" fill="rgba(91,224,138,.07)" stroke="#3aa663"/>
       <text x="580" y="183" text-anchor="middle" fill="#e9f0ed" font-size="14" font-weight="700">mcp-api</text>
-      <text x="580" y="204" text-anchor="middle" fill="#a5b5ae" font-size="11">MCP-over-HTTP · 23 tools</text>
+      <text x="580" y="204" text-anchor="middle" fill="#a5b5ae" font-size="11">MCP-over-HTTP · 26 tools</text>
 
       <!-- Claude -->
       <rect x="720" y="150" width="140" height="80" rx="12" fill="rgba(122,162,255,.07)" stroke="#4f6bc4"/>
@@ -490,7 +491,7 @@
     </div>
     <div class="legend-item">
       <h4><span class="dot" style="background:#5be08a"></span>mcp-api</h4>
-      <p>Uma Edge Function que é um servidor MCP falando HTTP. São 23 ferramentas — inbox, read,
+      <p>Uma Edge Function que é um servidor MCP falando HTTP. São 26 ferramentas — inbox, read,
       send, search e companhia — que qualquer harness MCP consome.</p>
     </div>
     <div class="legend-item">
@@ -517,12 +518,14 @@
     <div class="tool-row"><span class="say">"<b>Procura onde falaram de orçamento</b>"</span><code>search</code></div>
     <div class="tool-row"><span class="say">"<b>Categoriza esse chat como cliente</b>"</span><code>categorize_chat</code></div>
     <div class="tool-row"><span class="say">"<b>Reage com 👍 na última do Pedro</b>"</span><code>react</code></div>
-    <div class="tool-row"><span class="say">"<b>Manda um áudio pra Ana</b>" (texto vira voz)</span><code>send_voice</code></div>
+    <div class="tool-row"><span class="say">"<b>Manda um áudio pra Ana</b>" (texto vira voz, no seu clone)</span><code>send_voice</code></div>
+    <div class="tool-row"><span class="say">"<b>Manda amanhã às 9h pro Pedro</b>" (agenda e cancela)</span><code>schedule</code></div>
     <div class="tool-row"><span class="say">"<b>Essa mensagem tá no meu tom?</b>"</span><code>check_message</code></div>
   </div>
   <div class="note-strip reveal">
     E mais: transcrição sob demanda, download de anexos, edição e apagamento de mensagens,
-    anotações por contato, sincronização de grupos, merge de chats duplicados… <strong>23 tools</strong>
+    mensagens agendadas (listar e cancelar), anotações por contato, sincronização de grupos,
+    merge de chats duplicados… <strong>26 tools</strong>
     no total — a lista completa está no <a href="https://github.com/Expert-Integrado/whatsapp-agent#manual-de-uso">README</a>.
   </div>
   <div class="note-strip reveal">
@@ -585,8 +588,18 @@
   </div>
   <div class="note-strip reveal">
     <strong>E a voz literal:</strong> com uma conta ElevenLabs, "manda um áudio pra Ana" vira mensagem
-    de voz de verdade — <code>send_voice</code> transforma o texto em PTT usando a <strong>voz default da
-    instância</strong> (clone da sua voz ou uma voz do acervo, escolhida na instalação).
+    de voz de verdade — <code>send_voice</code> transforma o texto em PTT com o <strong>clone da sua
+    voz</strong> (ou uma voz do acervo). Os ajustes moram em <strong>perfis nomeados no banco</strong>
+    (<code>casual</code>, <code>profissional</code>…): você pede "um áudio profissional pro cliente" e o
+    servidor resolve voz e regulagem — nenhum agente inventa settings errados.
+  </div>
+  <div class="note-strip reveal">
+    <strong>Áudio que soa falado, não lido:</strong> antes de virar voz, o texto passa por
+    <strong>humanização oral</strong> — "está" vira "tá", "para" vira "pra", "implementar" vira
+    "implementá", com regras estruturais do português falado (acentos, siglas e estrangeirismos
+    protegidos). É escolha sua na instalação: humanizado ou texto literal, reversível quando quiser.
+    E a regulagem final da voz é feita <strong>de ouvido</strong>: o setup manda áudios de teste no seu
+    próprio WhatsApp e você escolhe o que soou mais você.
   </div>
 </section>
 
@@ -668,10 +681,12 @@
     <div class="step">
       <div>
         <h3>Clone o repo e rode a skill <code>/setup</code></h3>
-        <p>Abra a pasta no Claude Code (aba Code do Claude Desktop) e peça o setup: o Claude
-        instala o Supabase CLI se faltar, pede uma credencial de cada vez (só no
-        <code>.env</code> local, gitignored), aplica as migrations, configura os secrets e
-        deploya as Edge Functions.</p>
+        <p>Abra a pasta no Claude Code (aba Code do Claude Desktop) e peça o setup: é uma
+        <strong>instalação 100% em conversa</strong> — o Claude monta a infraestrutura sozinho
+        (credenciais só no <code>.env</code> local, migrations, secrets, Edge Functions), prova que
+        está no ar com uma mensagem real e conduz as <strong>3 decisões de identidade</strong>: a sua
+        voz em áudio (clone ElevenLabs calibrado de ouvido), áudio falado ou lido (humanização) e o
+        seu jeito de escrever (voice guide).</p>
       </div>
     </div>
     <div class="step">
@@ -686,6 +701,50 @@
   <div class="note-strip reveal">
     Passo a passo completo, com o prompt pronto do setup, no
     <a href="https://github.com/Expert-Integrado/whatsapp-agent#instalação">README do repositório</a>.
+  </div>
+</section>
+
+<section id="novidades" class="wrap">
+  <div class="section-head reveal">
+    <div class="eyebrow">08 · Novidades</div>
+    <h2>Últimas atualizações</h2>
+    <p class="section-sub">
+      O que entrou de novo, do mais recente pro mais antigo. Pra atualizar a sua instalação:
+      <code>git pull</code> na pasta do repo e peça ao Claude "aplica as migrations novas e
+      redeploya as functions".
+    </p>
+  </div>
+  <div class="card-grid reveal" style="grid-template-columns: repeat(2, 1fr);">
+    <div class="card">
+      <div class="card-icon">🗣️</div>
+      <h3>Julho/2026 — Voz de verdade</h3>
+      <p><strong>Perfis de voz no servidor:</strong> "manda um áudio profissional" resolve voz e
+      regulagem sozinho. <strong>Humanização oral:</strong> o áudio soa falado ("tá", "pra",
+      "implementá"), não lido — e é escolha sua na instalação. <strong>Calibração de ouvido:</strong>
+      o setup manda áudios de teste no seu WhatsApp e você escolhe o que soou mais você.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">💬</div>
+      <h3>Julho/2026 — Setup 100% em conversa</h3>
+      <p>O onboarding virou uma conversa em linguagem de dono de negócio: custos avisados antes,
+      uma pergunta por vez, prova de vida com mensagem real e as 3 decisões de identidade
+      (voz, humanização e voice guide) conduzidas até o fim — ninguém termina a instalação
+      sem um voice guide instalado ou um pulo consciente.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">⏰</div>
+      <h3>Julho/2026 — Mensagens agendadas</h3>
+      <p>"Manda amanhã às 9h pro Pedro" agenda o envio no servidor — com listagem e cancelamento
+      ("cancela o que eu agendei pra amanhã"). Funciona mesmo com o seu computador desligado:
+      quem dispara é o banco.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧭</div>
+      <h3>Julho/2026 — Inbox que sabe quem deve</h3>
+      <p>O inbox calcula quem está devendo resposta, grupos ficam fora do ruído, "ignora esse"
+      resolve a conversa na hora e "me lembra semana que vem" vira snooze. Reage, edita, apaga e
+      encaminha em um comando, sem ler a conversa antes.</p>
+    </div>
   </div>
 </section>
 
