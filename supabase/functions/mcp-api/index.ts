@@ -1579,13 +1579,13 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "send_voice",
-    description: "Gera audio TTS (ElevenLabs) e envia como mensagem de voz (PTT). SO quando o usuario pediu audio EXPLICITAMENTE (texto e o canal default). PREFIRA `profile` (catalogo no banco, settings travados server-side): eric-casual (DEFAULT conversa em curso), eric-casual-animado (comemoracao: parabens/bora/fechou), eric-profissional (lead novo, decisor, 1a abordagem, B2B), eric-prospeccao (massa), eric-v2 (alternativa), jully (assistente — audio pro proprio dono). Perfil bloqueado/inexistente = erro com a lista dos ativos; voz '1309'/'13/09' bloqueada ate calibrar; rotulo vago ('voz antiga') = listar candidatos ao usuario, nao adivinhar. HUMANIZACAO e server-side pelo perfil — envie texto LIMPO com acentuacao correta (retorno traz text_spoken). FLUXO OBRIGATORIO: 1a chamada SEM confirmed (bloqueia e mostra resumo); 2a com confirmed:true apos o usuario confirmar; EXCECAO audio pro proprio dono ja pedido explicito = confirmed:true direto. Legacy: voice_id explicito com settings manuais; sem profile e sem voice_id usa a voz default da instancia. Max ~150 palavras (~60s).",
+    description: "Gera audio TTS (ElevenLabs) e envia como mensagem de voz (PTT). SO quando o usuario pediu audio EXPLICITAMENTE (texto e o canal default). PREFIRA `profile` (catalogo voice_profiles no banco, settings travados server-side) — chamada com perfil inexistente/bloqueado retorna erro COM A LISTA dos perfis ativos da instalacao: use essa lista como fonte, nao adivinhe nomes; rotulo vago do usuario ('voz antiga') = listar candidatos e perguntar. Convencao de catalogo: 'casual' (DEFAULT conversa em curso), 'profissional' (lead novo, decisor, 1a abordagem, B2B). HUMANIZACAO e server-side pelo perfil — envie texto LIMPO com acentuacao correta (retorno traz text_spoken). FLUXO OBRIGATORIO: 1a chamada SEM confirmed (bloqueia e mostra resumo); 2a com confirmed:true apos o usuario confirmar; EXCECAO audio pro proprio dono ja pedido explicito = confirmed:true direto. Legacy: voice_id explicito com settings manuais; sem profile e sem voice_id usa a voz default da instancia. Max ~150 palavras (~60s).",
     inputSchema: {
       type: "object",
       properties: {
         to: { type: "string", description: "Destinatario: chat_id ou phone" },
         text: { type: "string", description: "Texto a converter em fala (max 5000). Limpo, com acentos — a humanizacao oral e server-side" },
-        profile: { type: "string", description: "Perfil do catalogo voice_profiles (ex: eric-casual). Trava voice_id/model/settings server-side. Nao combinar com voice_id" },
+        profile: { type: "string", description: "Perfil do catalogo voice_profiles (ex: casual). Trava voice_id/model/settings server-side. Nao combinar com voice_id" },
         voice_id: { type: "string", description: "ElevenLabs voice ID (legado/avancado — prefira profile)" },
         model_id: { type: "string", description: "Modelo ElevenLabs (default eleven_turbo_v2_5; ignorado com profile)" },
         stability: { type: "number", description: "0-1 (default 0.45; ignorado com profile)" },

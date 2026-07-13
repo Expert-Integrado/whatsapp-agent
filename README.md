@@ -45,24 +45,28 @@ O Claude conduz o setup pra você; você só fornece as credenciais.
 
    ![Aba Code do Claude Desktop](docs/claude-desktop-code.png)
 
-2. **Rode a skill `/setup`** (project skill em [`.claude/skills/setup`](.claude/skills/setup/SKILL.md), detectada automaticamente ao abrir a pasta no Claude Code) — ou cole o prompt abaixo. Ela instala o Supabase CLI se faltar, coleta suas credenciais (só no `.env` local, gitignored), aplica as migrations, configura os secrets, deploya as Edge Functions e te entrega a conexão do MCP:
+2. **Rode a skill `/setup`** (project skill em [`.claude/skills/setup`](.claude/skills/setup/SKILL.md), detectada automaticamente ao abrir a pasta no Claude Code) — ou cole o prompt abaixo. É uma instalação 100% em conversa: o Claude instala o Supabase CLI se faltar, coleta suas credenciais (só no `.env` local, gitignored), aplica as migrations, configura os secrets, deploya as Edge Functions, prova que está tudo no ar com uma mensagem real e conduz as **3 decisões de identidade do agente** — a sua **voz em áudio** (clone ElevenLabs, calibrada de ouvido), se o áudio soa **falado ou lido** (humanização oral) e o seu **jeito de escrever** (voice guide):
 
 ```text
 Instale o WhatsApp Agent neste repositório, do zero, seguindo a skill setup
-(.claude/skills/setup/SKILL.md) e o protocolo de onboarding do CLAUDE.md. Antes de
-começar, verifique os pré-requisitos (Supabase CLI + contas). Use o Supabase CLI pra
-tudo do Supabase — supabase link, db push, secrets set, functions deploy. Pra CADA
-etapa de navegador (criar conta/instância na Z-API e conectar o número via QR code,
-criar o projeto Supabase e gerar PAT/chaves, criar a API key da OpenAI, escolher a voz
-na ElevenLabs), pergunte com botões (AskUserQuestion): "Essa etapa é no navegador.
-Quer que eu faça pra você?" — rota default: você faz via Playwright MCP (se faltar,
-instale com: claude mcp add playwright -- npx -y @playwright/mcp@latest); alternativas:
-Claude in Chrome, ou me guiar no passo a passo manual. Login é sempre comigo — nunca
-peça senha no chat. Valide cada credencial com uma chamada real antes de seguir.
-Conduza passo a passo, pedindo uma credencial de cada vez e guardando-as SÓ no .env
-local (gitignored) — nunca commite. No fim, me dê a URL da mcp-api + a MCP_API_KEY pra
-eu conectar o MCP no meu harness, rode o teste E2E (a tool `status`) e me entregue um
-resumo do que ficou configurado.
+(.claude/skills/setup/SKILL.md) e o protocolo de onboarding do CLAUDE.md. Conduza como
+uma CONVERSA, em linguagem de dono de negócio (sem jargão técnico), uma pergunta por
+vez, com os custos avisados antes. Antes de começar, verifique os pré-requisitos
+(Supabase CLI + contas). Use o Supabase CLI pra tudo do Supabase — supabase link,
+db push, secrets set, functions deploy. Pra CADA etapa de navegador (criar
+conta/instância na Z-API e conectar o número via QR code, criar o projeto Supabase e
+gerar PAT/chaves, criar a API key da OpenAI, escolher/clonar a voz na ElevenLabs),
+pergunte com botões (AskUserQuestion): "Essa etapa é no navegador. Quer que eu faça
+pra você?" — rota default: você faz via Playwright MCP (se faltar, instale com:
+claude mcp add playwright -- npx -y @playwright/mcp@latest); alternativas: Claude in
+Chrome, ou me guiar no passo a passo manual. Login é sempre comigo — nunca peça senha
+no chat. Valide cada credencial com uma chamada real antes de seguir, guardando-as SÓ
+no .env local (gitignored) — nunca commite. Conduza as 3 decisões de identidade da
+skill: minha voz em áudio (ElevenLabs, com calibração de ouvido no final), humanização
+oral (áudio falado vs lido) e voice guide (meu jeito de escrever — a skill não deixa
+essa decisão passar em branco). No fim, prove que funciona com uma mensagem real
+(prova de vida da skill), me dê a URL da mcp-api + credenciais de conexão e me
+entregue o cartão final com o que ficou configurado e as pendências.
 ```
 
 > As credenciais dos serviços (Z-API, OpenAI) vão pros **secrets do Supabase** (`supabase secrets set`) — é lá que as Edge Functions as leem. O `.env` local é só o veículo do setup; o runtime não depende dele.
@@ -76,7 +80,7 @@ Pra **operar**, conecte o **MCP remoto** (`https://SEU_PROJECT_REF.supabase.co/f
 - **Claude Code** (inclui a aba **Code** do Desktop) — header key: o `.mcp.json` deste repo já tem o esqueleto; defina `WHATSAPP_AGENT_MCP_URL` (a URL da sua `mcp-api`) e `MCP_API_KEY` no ambiente.
 - **Claude Desktop (chat) ou Claude Web** (claude.ai) — **OAuth**: Settings → Connectors → *Add custom connector* → cole a URL → em *Advanced settings*, informe o **Client ID + Client Secret** que o setup gerou pra você → conectar. (A tela de Connectors não aceita header custom; o OAuth é auto-aprovado, sem tela extra.)
 
-Conectado, você opera o WhatsApp **conversando com o Claude em linguagem natural** — sem comandos nem skills pra instalar. O **MCP expõe 23 ferramentas** que o Claude aciona conforme o que você pede:
+Conectado, você opera o WhatsApp **conversando com o Claude em linguagem natural** — sem comandos nem skills pra instalar. O **MCP expõe 26 ferramentas** que o Claude aciona conforme o que você pede:
 
 | Você diz… | Tool |
 |---|---|
@@ -101,11 +105,16 @@ O agente escreve melhor em seu nome quando sabe **como cada pessoa te chama e co
 
 ### A sua voz em áudio (opcional)
 
-Com uma conta [ElevenLabs](https://elevenlabs.io), *"manda um áudio pra Ana"* vira uma mensagem de voz de verdade (PTT). Duas escolhas na instalação:
+Com uma conta [ElevenLabs](https://elevenlabs.io), *"manda um áudio pra Ana"* vira uma mensagem de voz de verdade (PTT). A skill `/setup` conduz tudo isso em conversa; por baixo:
 
-1. **Qual voz?** No [Voice Lab](https://elevenlabs.io/app/voice-lab), **clone a sua própria voz** (1-2 min de áudio limpo — o resultado é o áudio saindo como se fosse você) ou escolha uma voz do acervo.
-2. **Grave-a como default:** o voice ID escolhido vai em `wa_instance.default_voice_id` (a skill `/setup` conduz). A partir daí o `send_voice` usa essa voz sempre — sem precisar informar `voice_id` a cada pedido.
-3. **Catálogo de perfis (opcional, migration 0051):** a tabela `voice_profiles` guarda perfis nomeados (ex.: `casual`, `profissional`, `animado`) com voice ID + settings **travados no servidor** e nível de humanização oral (`forte`/`leve`/`nenhum` — contrações tipo "tá/cê/pra" aplicadas antes do TTS). O agente escolhe o perfil pelo contexto do pedido (*"manda um áudio profissional pro cliente"*) e passa só `profile` — o servidor resolve o resto, então nenhum agente consegue inventar settings errados. Perfil sem voice ID cadastrado é recusado com o motivo.
+1. **Qual voz?** No [Voice Lab](https://elevenlabs.io/app/voice-lab), **clone a sua própria voz** (1-2 min falando natural, sem ler texto — o resultado é o áudio saindo como se fosse você) ou escolha uma voz do acervo. O voice ID vai em `wa_instance.default_voice_id`.
+2. **Catálogo de perfis (migration 0051):** a tabela `voice_profiles` guarda perfis nomeados (`casual`, `profissional`, …) com voice ID + settings **travados no servidor** e nível de humanização oral por perfil. O agente escolhe o perfil pelo contexto do pedido (*"manda um áudio profissional pro cliente"*) e passa só `profile` — o servidor resolve o resto, então nenhum agente consegue inventar settings errados. Perfil sem voice ID cadastrado é recusado com o motivo.
+3. **Calibração de ouvido:** no final do setup, o Claude manda áudios de teste no seu próprio WhatsApp (mesmo texto, ajustes diferentes) e você escolhe o que "soou como você" — o resultado é gravado nos perfis. Aprendizado de campo: pra voz clonada, `similarity_boost` alto (0.90+) é o que segura o timbre e permite subir a expressividade.
+4. **Humanização oral (migration 0052):** o texto é adaptado antes do TTS pra soar **falado, não lido** ("está"→"tá", "para"→"pra", "implementar"→"implementá" — regras estruturais do português oral paulista em [`humanize.ts`](supabase/functions/_shared/humanize.ts)). Liga/desliga por instância (`wa_instance.humanize_enabled`); o nível (`forte`/`leve`/`nenhum`) vem do perfil de voz.
+
+### O seu jeito de escrever (voice guide)
+
+Quando você pede *"responde o João pra mim"*, o agente redige **em seu nome** — e sem um guia do seu estilo, o texto sai correto mas com cara de assistente genérico. O **voice guide** (tabela `voice_guide`) é um documento com o seu jeito de escrever (abertura/fechamento típicos, registro, o que você nunca usaria, exemplos reais), consultado pelas tools `send`/`check_message` antes de redigir. A skill `/setup` monta o seu em ~10 minutos (você cola 3-5 mensagens suas + responde 6 perguntas) — ou instala um documento de estilo que você já tenha. Sem guide instalado, o agente avisa que está redigindo em estilo genérico.
 
 ### Como o agente decide "quem está devendo resposta"
 
@@ -151,7 +160,7 @@ flowchart LR
 Três serviços, com o Supabase como **runtime**:
 
 - **Provedor WhatsApp** — gateway do WhatsApp. Pode ser **Z-API** (hospedado, pago) ou **Evolution API** (self-hosted, open-source), selecionável por instância. Recebe as suas mensagens (webhook → `process-webhook`) e envia as respostas via `wa-proxy`.
-- **Supabase** — o coração **e o runtime**. Postgres (mensagens, chats, contatos, categorias), Storage (6 buckets de mídia), Edge Functions (Deno) e `pg_cron` (transcrição a cada 2 min, limpeza). Entre as functions está a **`mcp-api`: o MCP server falando HTTP** — é ela que expõe as 23 tools. 43 migrations versionadas.
+- **Supabase** — o coração **e o runtime**. Postgres (mensagens, chats, contatos, categorias), Storage (6 buckets de mídia), Edge Functions (Deno) e `pg_cron` (transcrição a cada 2 min, limpeza). Entre as functions está a **`mcp-api`: o MCP server falando HTTP** — é ela que expõe as 26 tools. 50 migrations versionadas.
 - **OpenAI** — Whisper, pra transcrever os áudios.
 - **Harness** — qualquer Claude (Code, Desktop ou Web) conecta na `mcp-api`. O Claude Code usa **`x-mcp-key`**; o chat do Desktop/Web usa **OAuth** (a própria `mcp-api` é o Authorization Server — confidential client + PKCE, auto-aprovado, sem tela). Não há processo local: o MCP roda no Supabase.
 

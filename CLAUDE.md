@@ -7,19 +7,14 @@ Backend headless que conecta um número de WhatsApp ao Claude via MCP: provedor 
 
 ## Onboarding assistido (instruções para o Claude)
 
-**Oferta ativa:** ao abrir este repositório sem configuração (sem `.env` na raiz, ou o usuário indica que nada foi instalado ainda), ofereça o setup de imediato: "Quer que eu instale o WhatsApp Agent agora? Eu conduzo passo a passo." A condução completa mora na project skill [`setup`](.claude/skills/setup/SKILL.md) — siga-a etapa por etapa; esta seção define só o protocolo de condução (não duplica a skill).
+**Oferta ativa:** ao abrir este repositório sem configuração (sem `.env` na raiz, ou o usuário indica que nada foi instalado ainda), ofereça o setup de imediato: "Quer que eu instale o WhatsApp Agent agora? Eu conduzo conversando com você." A condução completa — inclusive o protocolo de conversa (linguagem de dono, uma pergunta por vez, custos antes, rotas de navegador, validação de credencial, retomada) — mora na project skill [`setup`](.claude/skills/setup/SKILL.md): siga a seção "Como conduzir a conversa" dela antes de executar qualquer etapa. Não improvise um roteiro próprio.
 
-**Protocolo:**
+**Invariantes (valem mesmo fora do setup completo, ex. reconfigurar só a voz):**
 
-1. **Pré-requisitos primeiro.** Verifique o Supabase CLI (`supabase --version`) e as contas necessárias (Supabase, Z-API ou Evolution, OpenAI; ElevenLabs opcional) antes de qualquer passo.
-2. **Etapa de navegador = perguntar com botões.** Para CADA etapa que acontece no navegador, pergunte via AskUserQuestion: **"Essa etapa é no navegador. Quer que eu faça pra você?"** com estas opções:
-   - **Default — Playwright MCP:** o Claude navega e preenche. Se o MCP faltar, instalar com `claude mcp add playwright -- npx -y @playwright/mcp@latest`.
-   - **Claude in Chrome** (Chrome do usuário, já logado), quando disponível.
-   - **Manual:** o Claude dita o passo a passo e o usuário executa.
-3. **Login é sempre do usuário.** Nunca peça senha ou código 2FA no chat. Na rota automatizada, abra a página de login e aguarde o usuário autenticar na própria janela antes de continuar.
-4. **Validar cada credencial com uma chamada real** antes de avançar (ex.: `GET /me` da instância Z-API; `supabase projects list` com o PAT; uma chamada mínima com a key da OpenAI). Credencial inválida = parar e corrigir na hora, não acumular pro fim.
-5. **Segredos só em `.env` local** (gitignored) e nos secrets do Supabase (`supabase secrets set`). Nunca em arquivo versionado; não ecoar valores no chat além do necessário.
-6. **Encerramento:** teste E2E real (tool `status` na `mcp-api` — conexão do provedor + contagem de mensagens), cartão de conexão (URL da `mcp-api` + credenciais de acesso) e resumo do que ficou configurado, com pendências explícitas.
+1. **Login é sempre do usuário.** Nunca peça senha ou código 2FA no chat.
+2. **Segredos só em `.env` local** (gitignored) e nos secrets do Supabase (`supabase secrets set`). Nunca em arquivo versionado; não ecoar valores no chat além do necessário.
+3. **Nunca declare pronto sem prova real** — a prova de vida da skill (seção 8), não build/deploy bem-sucedido.
+4. **Etapas de personalização são rodáveis isoladas:** "quero configurar a voz" = seções 2.3-2.5 + 8.1 da skill; "quero montar meu voice guide" = seção 2.6. Não exigem refazer o setup.
 
 **Etapas de navegador deste repo (com URLs):**
 
@@ -30,7 +25,7 @@ Backend headless que conecta um número de WhatsApp ao Claude via MCP: provedor 
 | Gerar o PAT do Supabase | <https://supabase.com/dashboard/account/tokens> |
 | Copiar as chaves do projeto (secret key + service_role legacy) | dashboard do projeto → Settings → API Keys |
 | Criar a API key da OpenAI (Whisper) | <https://platform.openai.com/api-keys> |
-| (Opcional) Escolher ou clonar a voz na ElevenLabs | <https://elevenlabs.io/app/voice-lab> |
+| (Se o usuário quis voz — triagem 0.4 da skill) Escolher ou clonar a voz na ElevenLabs | <https://elevenlabs.io/app/voice-lab> |
 
 Webhooks do provedor e secrets do Supabase são configurados por **CLI/curl** (a skill traz os comandos prontos) — não são etapa de navegador.
 
