@@ -193,6 +193,21 @@ curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/dat
 
 > Sem `default_voice_id`, o `send_voice` exige `voice_id` explicito a cada chamada. Precedencia: `voice_id` do request > `default_voice_id` da instancia > env `DEFAULT_VOICE_ID`.
 
+#### Calibracao da voz clonada (aprendizado de campo, 12/07/2026)
+
+Pra voz CLONADA, `similarity_boost` alto (**0.90+**) e o que segura o timbre da pessoa — com ele alto, da pra subir `style` (0.70-0.80) e baixar `stability` (0.25-0.35) e a voz fica expressiva SEM desgarrar do original. Os defaults da edge (0.45 / 0.75 / 0.30 / 0.95) sao conservadores: com similarity 0.75, subir o style distorce o clone (foi exatamente o defeito que travava a expressividade na instalacao de referencia).
+
+Antes de gravar o default, mande 2-3 audios de teste com variacoes pro dono ESCOLHER de ouvido (ex.: expressiva 0.25/0.90/0.80/1.0 vs neutra 0.45/0.90/0.30/0.95) — cada audio seguido de uma mensagem em RESPOSTA (thread) com a config usada, pra ele saber qual e qual mesmo se a ordem embaralhar. Grave os settings aprovados em `voice_profiles` (nao so o `default_voice_id`):
+
+```bash
+SQL="UPDATE voice_profiles SET voice_id = '<VOICE_ID>', stability = <stab>, similarity_boost = <sim>, style = <style>, speed = <speed>, updated_at = now() WHERE profile = '<PERFIL>';"
+curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"
+```
+
+> Modelo: manter `eleven_turbo_v2_5` (o multilingual v2 gera inconsistencia e gagueira em clones).
+
 #### Humanizacao oral (escolha obrigatoria quando ha voz)
 
 Os audios podem sair com **oralizacao paulista** — o texto e adaptado antes do TTS pra soar falado, nao lido ("implementar" vira "implementá", "está" vira "tá", "para" vira "pra"). O nivel (leve/forte) vem do perfil de voz (`voice_profiles.humanize`), mas **ligar ou desligar e escolha da instalacao** — o operador nao tem interface, entao a decisao e AQUI, no onboarding.
