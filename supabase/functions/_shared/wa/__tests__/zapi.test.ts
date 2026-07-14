@@ -427,3 +427,73 @@ Deno.test("zapi.buildSend mentionsEveryone expande participantes do grupo", asyn
     globalThis.fetch = original;
   }
 });
+
+// ── buildAction: grupos ──────────────────────────────────────────────────────
+
+const ZBASE = "https://api.z-api.io/instances/INST/token/TKN";
+
+Deno.test("zapi.buildAction group-metadata → GET com id @g.us normalizado pra -group", () => {
+  const r = z.buildAction(creds, "group-metadata", { groupId: "120363123@g.us" });
+  assertEquals(r!.url, `${ZBASE}/group-metadata/120363123-group`);
+  assertEquals(r!.method, "GET");
+  assertEquals(r!.body, undefined);
+});
+
+Deno.test("zapi.buildAction group-invitation-link → GET, aceita alias phone", () => {
+  const r = z.buildAction(creds, "group-invitation-link", { phone: "120363123-group" });
+  assertEquals(r!.url, `${ZBASE}/group-invitation-link/120363123-group`);
+  assertEquals(r!.method, "GET");
+});
+
+Deno.test("zapi.buildAction redefine-invitation-link → POST com id no path", () => {
+  const r = z.buildAction(creds, "redefine-invitation-link", { groupId: "120363123" });
+  assertEquals(r!.url, `${ZBASE}/redefine-invitation-link/120363123-group`);
+  assertEquals(r!.method, "POST");
+});
+
+Deno.test("zapi.buildAction group-invitation-metadata / accept-invite → GET com url encodada", () => {
+  const url = "https://chat.whatsapp.com/ABC123def";
+  const r1 = z.buildAction(creds, "group-invitation-metadata", { url });
+  assertEquals(r1!.url, `${ZBASE}/group-invitation-metadata?url=${encodeURIComponent(url)}`);
+  assertEquals(r1!.method, "GET");
+  const r2 = z.buildAction(creds, "accept-invite", { url });
+  assertEquals(r2!.url, `${ZBASE}/accept-invite-group?url=${encodeURIComponent(url)}`);
+  assertEquals(r2!.method, "GET");
+});
+
+Deno.test("zapi.buildAction toggle-ephemeral → null (não suportado)", () => {
+  assertEquals(z.buildAction(creds, "toggle-ephemeral", { groupId: "1", expiration: 86400 }), null);
+});
+
+Deno.test("zapi.buildAction update-group-name normaliza groupId no POST genérico", () => {
+  const r = z.buildAction(creds, "update-group-name", { groupId: "120363123@g.us", groupName: "Novo" });
+  assertEquals(r!.url, `${ZBASE}/update-group-name`);
+  assertEquals(r!.method, "POST");
+  assertEquals(JSON.parse(r!.body!), { groupId: "120363123-group", groupName: "Novo" });
+});
+
+Deno.test("zapi.buildAction leave-group aceita alias phone → body com groupId", () => {
+  const r = z.buildAction(creds, "leave-group", { phone: "120363123@g.us" });
+  assertEquals(r!.url, `${ZBASE}/leave-group`);
+  assertEquals(JSON.parse(r!.body!), { groupId: "120363123-group" });
+});
+
+Deno.test("zapi.buildAction update-group-settings usa campo phone (dialeto do endpoint)", () => {
+  const r = z.buildAction(creds, "update-group-settings", {
+    groupId: "120363123@g.us",
+    adminOnlyMessage: true, adminOnlySettings: false,
+    requireAdminApproval: false, adminOnlyAddMember: true,
+  });
+  assertEquals(r!.url, `${ZBASE}/update-group-settings`);
+  assertEquals(JSON.parse(r!.body!), {
+    phone: "120363123-group",
+    adminOnlyMessage: true, adminOnlySettings: false,
+    requireAdminApproval: false, adminOnlyAddMember: true,
+  });
+});
+
+Deno.test("zapi.buildAction add-participant normaliza groupId e mantém phones", () => {
+  const r = z.buildAction(creds, "add-participant", { groupId: "120363123", phones: ["5511999990001"], autoInvite: true });
+  assertEquals(r!.url, `${ZBASE}/add-participant`);
+  assertEquals(JSON.parse(r!.body!), { groupId: "120363123-group", phones: ["5511999990001"], autoInvite: true });
+});

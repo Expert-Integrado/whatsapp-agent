@@ -1,12 +1,12 @@
 # Referência do MCP
 
-O servidor MCP é a Edge Function [`mcp-api`](../../supabase/functions/mcp-api/index.ts) — **não** é um processo local nem um MCP externo. Ele expõe ~20 tools que o Claude (ou qualquer harness com suporte a MCP) aciona em linguagem natural. **Fonte:** [`supabase/functions/mcp-api/index.ts`](../../supabase/functions/mcp-api/index.ts).
+O servidor MCP é a Edge Function [`mcp-api`](../../supabase/functions/mcp-api/index.ts) — **não** é um processo local nem um MCP externo. Ele expõe 32 tools que o Claude (ou qualquer harness com suporte a MCP) aciona em linguagem natural. **Fonte:** [`supabase/functions/mcp-api/index.ts`](../../supabase/functions/mcp-api/index.ts).
 
 ---
 
 ## Como funciona
 
-- **Transporte:** MCP-over-HTTP, JSON-RPC 2.0 stateless (`initialize`, `tools/list`, `tools/call`, `ping`). Protocolo `2024-11-05`, server `whatsapp-agent` v3.0.0.
+- **Transporte:** MCP-over-HTTP, JSON-RPC 2.0 stateless (`initialize`, `tools/list`, `tools/call`, `ping`). Protocolo `2024-11-05`, server `whatsapp-agent` v3.5.0.
 - **URL:** `https://SEU_PROJECT_REF.supabase.co/functions/v1/mcp-api`.
 - **Acesso interno:** a function roda com a `service_role` e chama as outras Edge Functions (`wa-proxy`, `send-message`, `send-voice`, `transcribe-queue`) e o banco diretamente. Deploy com `verify_jwt=false` (tem auth própria — ver [config.toml](../../supabase/config.toml)).
 
@@ -48,6 +48,15 @@ Categoria: **read** (consulta), **write** (altera metadados no banco), **destruc
 | `react` | write | — | Reage a uma mensagem com emoji (string vazia remove) |
 | `transcribe_audio` | write | — | Força transcrição de áudios pendentes (até 20) → `messages.content` |
 | `sync_groups` | write | — | Sincroniza nomes de grupos via provider (`dry_run` disponível) |
+| `resolve_chat` | write | — | Marca conversa como resolvida/snooze (sai do "esperando resposta"); `reopen:true` desfaz |
+| `check_delivery` | read | — | Status de entrega de mensagens de agente (detecta chat fantasma preso em sent/pending) |
+| `merge_ghost_chats` | write | — | Funde pares real+fantasma do 9º dígito (`dry_run` default true) |
+| `group_info` | read | — | Metadata completo de um grupo (participantes, admins, settings, link); sincroniza em `chats`/`group_participants` |
+| `group_invite` | read/destructive | ✅* | Link de convite: `get`/`info` (read), `revoke` e `accept` (✅ exigem confirmação) |
+| `group_create` | destructive | ✅ | Cria grupo com participantes (retorna `group_id` + `invite_link`) |
+| `group_update` | destructive | ✅ | Atualiza nome/descrição/foto/settings do grupo; mensagens temporárias (só Evolution) |
+| `group_members` | destructive | ✅ | add/remove/promote/demote de participantes; approve/reject de entrada pendente (só Z-API) |
+| `group_leave` | destructive | ✅ | Sai do grupo com o número da instância |
 | `list_scheduled` | read | — | Lista sequências de mensagens agendadas (default: `pending`); traz id, horário BRT, progresso (`items_sent/total`) e erro |
 | `cancel_scheduled` | write | — | Cancela uma sequência agendada ainda `pending` (por id) |
 | `schedule` | destructive | ✅ | Agenda uma **sequência** de 1–10 mensagens (texto/mídia/voz TTS/enquete) pra envio único futuro. Confirmação na **criação**; o disparo (worker `dispatch-scheduled`, cron 1/min) roda sem novo gate |
