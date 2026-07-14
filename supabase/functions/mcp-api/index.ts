@@ -418,15 +418,6 @@ async function resolveChat(to: string, instance?: string): Promise<any> {
   return { candidates: scored.slice(0, 10).map((c: any) => ({ chat_id: c.chat_id, name: c.chat_name || c.contact_name, is_group: c.is_group, last_message_at: c.last_message_at, instance: c.instance_id })) };
 }
 
-// chat_id -> phone pro wa-proxy: grupo (@g.us / -group) passa CRU (cada adapter
-// entende seu dialeto); 1-1 tem o sufixo removido pra virar telefone puro. Sem
-// isso, editar/reagir/deletar/encaminhar em grupo mandava o @g.us pro toJid do
-// adapter, que reconstruia como @s.whatsapp.net e a acao caia num chat 1-1 fantasma.
-function phoneForAction(chatId: unknown): string {
-  const s = String(chatId ?? "");
-  return /(@g\.us|-group)$/.test(s) ? s : s.replace(/@.*$/, "");
-}
-
 // ─── Grupos (helpers) ─────────────────────────────────────────────────────────
 // Chamada padrao ao wa-proxy pras actions de grupo (gate confirmed ja passou aqui).
 function callWaProxy(action: string, wparams: Record<string, unknown>, instance: string | null) {
@@ -1346,7 +1337,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         } else {
           return json({ error: "Forneca message_id OU chat (com target opcional)." }, 400);
         }
-        const phone = phoneForAction(msg.chat_id);
+        const phone = String(msg.chat_id).replace(/@.*$/, "");
         const { status, data } = await callEdge("wa-proxy", { action: "send-reaction", params: { phone, messageId: msg.provider_msg_id, reaction: emoji }, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         // Preview da mensagem alvo: confirma que reagiu na certa sem precisar de read.
@@ -1376,7 +1367,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const ageMs = Date.now() - (msg.message_ts ? new Date(msg.message_ts).getTime() : 0);
         if (ageMs > 15 * 60 * 1000) return json({ error: `Janela de 15min expirada. Use delete + send.` }, 400);
         if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id: msg.id, target_message: messagePreview(msg), new_content, instruction: "Mostre a mensagem e o novo texto ao usuario; reenvie com confirmed:true e ESTE message_id apos ele confirmar." });
-        const phone = phoneForAction(msg.chat_id);
+        const phone = String(msg.chat_id).replace(/@.*$/, "");
         const { status, data } = await callEdge("wa-proxy", { action: "send-text", params: { phone, message: new_content, editMessageId: msg.provider_msg_id }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         await supabase.from("messages").update({ content: new_content, is_edited: true }).eq("id", msg.id);
@@ -1399,7 +1390,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           return json({ error: "Forneca message_id OU chat (com target opcional)." }, 400);
         }
         if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id: msg.id, target_message: messagePreview(msg), instruction: "Confirme com o usuario antes de apagar; reenvie com confirmed:true e ESTE message_id." });
-        const phone = phoneForAction(msg.chat_id);
+        const phone = String(msg.chat_id).replace(/@.*$/, "");
         const { status, data } = await callEdge("wa-proxy", { action: "delete-message", params: { phone, messageId: msg.provider_msg_id, owner: !!msg.from_me }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         await supabase.from("messages").update({ is_deleted: true }).eq("id", msg.id);
@@ -1418,7 +1409,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           if (r.error) return json({ ok: false, error: r.error }, r.status ?? 400);
           if (r.candidates) return json({ ok: true, ambiguous: true, candidates: r.candidates });
           zparams.messageId = r.msg.provider_msg_id;
-          zparams.messagePhone = phoneForAction(r.msg.chat_id);
+          zparams.messagePhone = String(r.msg.chat_id).replace(/@.*$/, "");
           zparams._target_message = messagePreview(r.msg);
           delete zparams.from_chat; delete zparams.target;
         }

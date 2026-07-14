@@ -1,6 +1,6 @@
 # WhatsApp Agent — instruções para o Claude
 
-Backend headless que conecta um número de WhatsApp ao Claude via MCP: provedor (Z-API ou Evolution API) → Supabase (Postgres + Storage + Edge Functions) → `mcp-api` (MCP-over-HTTP, 32 tools). Não há processo local: o runtime é o projeto Supabase de quem instala.
+Backend headless que conecta um número de WhatsApp ao Claude via MCP: provedor (Z-API ou Evolution API) → Supabase (Postgres + Storage + Edge Functions) → `mcp-api` (MCP-over-HTTP, 26 tools). Não há processo local: o runtime é o projeto Supabase de quem instala.
 
 - Página do projeto: <https://expert-integrado.github.io/whatsapp-agent/>
 - Instalação e manual de uso: [README](README.md) · referência técnica: [docs/reference/](docs/reference/)
