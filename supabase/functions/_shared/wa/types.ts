@@ -12,12 +12,7 @@ export type WaAction =
   | "send-text" | "send-poll" | "forward"
   | "delete-message" | "block-contact"
   | "create-group" | "add-participant" | "remove-participant"
-  | "add-admin" | "remove-admin"
-  | "approve-participant" | "reject-participant" | "leave-group"
-  | "update-group-name" | "update-group-description" | "update-group-photo"
-  | "update-group-settings" | "toggle-ephemeral"
-  | "group-metadata" | "group-invitation-link" | "group-invitation-metadata"
-  | "redefine-invitation-link" | "accept-invite";
+  | "add-admin" | "remove-admin";
 
 export interface InstanceCreds {
   provider: ProviderId;

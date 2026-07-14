@@ -47,9 +47,6 @@ const READ_ACTIONS = new Set([
   "get-contact-info",     // alias: edge converte pra GET /contacts/{phone} (inclui 'about' = recado)
   "phone-exists",         // alias: edge converte pra GET /phone-exists/{phone} — devolve numero canonico + lid
   "get-business-profile", // GET /business/profile?phone= — descricao/site/categorias de conta business de TERCEIRO (so Z-API)
-  "group-metadata",            // metadata + participantes do grupo
-  "group-invitation-link",     // link de convite atual
-  "group-invitation-metadata", // metadata de grupo via link de convite (sem entrar)
 ]);
 
 const WRITE_ACTIONS = new Set([
@@ -75,16 +72,6 @@ const DESTRUCTIVE_OTHER_ACTIONS = new Set([
   "remove-participant",
   "add-admin",         // promove a admin (substitui promote-participant)
   "remove-admin",      // rebaixa (substitui demote-participant)
-  "approve-participant",       // aprova entrada pendente (so Z-API)
-  "reject-participant",        // rejeita entrada pendente (so Z-API)
-  "leave-group",
-  "update-group-name",
-  "update-group-description",
-  "update-group-photo",
-  "update-group-settings",     // adminOnlyMessage/adminOnlySettings (+2 flags so Z-API)
-  "toggle-ephemeral",          // mensagens temporarias (so Evolution)
-  "redefine-invitation-link",  // revoga o link atual e gera novo
-  "accept-invite",             // entra num grupo via link com o numero da instancia
 ]);
 
 const DESTRUCTIVE_ACTIONS = new Set([
