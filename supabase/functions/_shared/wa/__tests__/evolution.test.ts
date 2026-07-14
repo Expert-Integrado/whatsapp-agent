@@ -701,6 +701,123 @@ Deno.test("evo.fetchGroups mapeia array de grupos para NeutralGroup", async () =
   }
 });
 
+// ── buildAction: grupos (novas actions) ───────────────────────────────────────
+
+Deno.test("evo.buildAction create-group traduz shape canônico Z-API {groupName, phones}", () => {
+  const r = e.buildAction(creds, "create-group", {
+    groupName: "Turma B", phones: ["5511999990001"], description: "desc",
+  });
+  assertEquals(r!.url.endsWith("/group/create/you_casa"), true);
+  assertEquals(JSON.parse(r!.body!), {
+    subject: "Turma B",
+    participants: ["5511999990001@s.whatsapp.net"],
+    description: "desc",
+  });
+});
+
+Deno.test("evo.buildAction add-participant aceita groupId -group e phones canônicos", () => {
+  const r = e.buildAction(creds, "add-participant", { groupId: "120363123-group", phones: ["5511999990001"] });
+  assertEquals(r!.url.includes("groupJid=120363123%40g.us"), true);
+  assertEquals(JSON.parse(r!.body!), { action: "add", participants: ["5511999990001@s.whatsapp.net"] });
+});
+
+Deno.test("evo.buildAction update-group-name → group/updateGroupSubject", () => {
+  const r = e.buildAction(creds, "update-group-name", { groupId: "120363123@g.us", groupName: "Novo" });
+  assertEquals(r!.url.includes("/group/updateGroupSubject/you_casa"), true);
+  assertEquals(r!.url.includes("groupJid=120363123%40g.us"), true);
+  assertEquals(r!.method, "POST");
+  assertEquals(JSON.parse(r!.body!), { subject: "Novo" });
+});
+
+Deno.test("evo.buildAction update-group-description → group/updateGroupDescription", () => {
+  const r = e.buildAction(creds, "update-group-description", { groupId: "120363123", groupDescription: "nova desc" });
+  assertEquals(r!.url.includes("/group/updateGroupDescription/you_casa"), true);
+  assertEquals(JSON.parse(r!.body!), { description: "nova desc" });
+});
+
+Deno.test("evo.buildAction update-group-photo → group/updateGroupPicture body {image}", () => {
+  const r = e.buildAction(creds, "update-group-photo", { groupId: "120363123", groupPhoto: "https://x/f.jpg" });
+  assertEquals(r!.url.includes("/group/updateGroupPicture/you_casa"), true);
+  assertEquals(JSON.parse(r!.body!), { image: "https://x/f.jpg" });
+});
+
+Deno.test("evo.buildAction group-metadata → GET group/findGroupInfos", () => {
+  const r = e.buildAction(creds, "group-metadata", { groupId: "120363123-group" });
+  assertEquals(r!.url.includes("/group/findGroupInfos/you_casa"), true);
+  assertEquals(r!.url.includes("groupJid=120363123%40g.us"), true);
+  assertEquals(r!.method, "GET");
+  assertEquals(r!.body, undefined);
+});
+
+Deno.test("evo.buildAction group-invitation-link → GET group/inviteCode", () => {
+  const r = e.buildAction(creds, "group-invitation-link", { groupId: "120363123" });
+  assertEquals(r!.url.includes("/group/inviteCode/you_casa"), true);
+  assertEquals(r!.method, "GET");
+});
+
+Deno.test("evo.buildAction redefine-invitation-link → POST group/revokeInviteCode", () => {
+  const r = e.buildAction(creds, "redefine-invitation-link", { groupId: "120363123" });
+  assertEquals(r!.url.includes("/group/revokeInviteCode/you_casa"), true);
+  assertEquals(r!.method, "POST");
+});
+
+Deno.test("evo.buildAction group-invitation-metadata extrai code de URL completa", () => {
+  const r = e.buildAction(creds, "group-invitation-metadata", { url: "https://chat.whatsapp.com/ABC123def" });
+  assertEquals(r!.url.includes("/group/inviteInfo/you_casa"), true);
+  assertEquals(r!.url.includes("inviteCode=ABC123def"), true);
+  assertEquals(r!.method, "GET");
+});
+
+Deno.test("evo.buildAction accept-invite aceita code cru", () => {
+  const r = e.buildAction(creds, "accept-invite", { inviteCode: "ABC123def" });
+  assertEquals(r!.url.includes("/group/acceptInviteCode/you_casa"), true);
+  assertEquals(r!.url.includes("inviteCode=ABC123def"), true);
+});
+
+Deno.test("evo.buildAction update-group-settings adminOnlyMessage → announcement", () => {
+  const r = e.buildAction(creds, "update-group-settings", { phone: "120363123-group", adminOnlyMessage: true });
+  assertEquals(r!.url.includes("/group/updateSetting/you_casa"), true);
+  assertEquals(JSON.parse(r!.body!), { action: "announcement" });
+});
+
+Deno.test("evo.buildAction update-group-settings adminOnlySettings=false → unlocked", () => {
+  const r = e.buildAction(creds, "update-group-settings", { groupId: "120363123", adminOnlySettings: false });
+  assertEquals(JSON.parse(r!.body!), { action: "unlocked" });
+});
+
+Deno.test("evo.buildAction update-group-settings sem flag equivalente → null", () => {
+  assertEquals(e.buildAction(creds, "update-group-settings", { groupId: "1", requireAdminApproval: true }), null);
+});
+
+Deno.test("evo.buildAction update-group-settings com 2 flags na mesma chamada → null (1 por vez)", () => {
+  assertEquals(e.buildAction(creds, "update-group-settings", { groupId: "1", adminOnlyMessage: true, adminOnlySettings: true }), null);
+});
+
+Deno.test("evo.buildAction participantes @lid passam intactos (add-participant e create-group)", () => {
+  const r1 = e.buildAction(creds, "add-participant", { groupId: "120363123", phones: ["89408434901109@lid", "5511999990001"] });
+  assertEquals(JSON.parse(r1!.body!).participants, ["89408434901109@lid", "5511999990001@s.whatsapp.net"]);
+  const r2 = e.buildAction(creds, "create-group", { groupName: "G", phones: ["89408434901109@lid"] });
+  assertEquals(JSON.parse(r2!.body!).participants, ["89408434901109@lid"]);
+});
+
+Deno.test("evo.buildAction toggle-ephemeral → group/toggleEphemeral", () => {
+  const r = e.buildAction(creds, "toggle-ephemeral", { groupId: "120363123", expiration: 86400 });
+  assertEquals(r!.url.includes("/group/toggleEphemeral/you_casa"), true);
+  assertEquals(JSON.parse(r!.body!), { expiration: 86400 });
+});
+
+Deno.test("evo.buildAction leave-group → DELETE group/leaveGroup", () => {
+  const r = e.buildAction(creds, "leave-group", { groupId: "120363123" });
+  assertEquals(r!.url.includes("/group/leaveGroup/you_casa"), true);
+  assertEquals(r!.url.includes("groupJid=120363123%40g.us"), true);
+  assertEquals(r!.method, "DELETE");
+});
+
+Deno.test("evo.buildAction approve/reject-participant → null (só Z-API)", () => {
+  assertEquals(e.buildAction(creds, "approve-participant", { groupId: "1", phones: ["5511"] }), null);
+  assertEquals(e.buildAction(creds, "reject-participant", { groupId: "1", phones: ["5511"] }), null);
+});
+
 // ── index.ts wire-up ──────────────────────────────────────────────────────────
 
 Deno.test("index.ts: getProvider('evolution').id === 'evolution'", () => {

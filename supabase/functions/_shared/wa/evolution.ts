@@ -303,6 +303,22 @@ export class EvolutionProvider implements WaProvider {
       return `${digits}@s.whatsapp.net`;
     };
 
+    /** Group id canônico ("1203...@g.us", "1203...-group" ou dígitos) → JID Evolution, URL-safe. */
+    const gjid = (v: unknown): string => {
+      const s = String(v ?? "");
+      return encodeURIComponent(s.endsWith("@g.us") ? s : `${digitsFromJid(s)}@g.us`);
+    };
+
+    /** Participante: JID completo (@lid/@s.whatsapp.net) passa intacto; só dígitos viram JID. */
+    const pJid = (ph: string): string => (ph.includes("@") ? ph : toJid(ph));
+
+    /** Extrai o inviteCode de uma URL chat.whatsapp.com/<code> ou aceita o code cru. */
+    const inviteCode = (p: Record<string, any>): string => {
+      const raw = String(p.inviteCode ?? p.url ?? "");
+      const code = raw.split("/").pop() ?? raw;
+      return encodeURIComponent(code.split("?")[0]);
+    };
+
     switch (action) {
       case "send-reaction": {
         const jid = toJid(params.phone ?? "");
@@ -376,13 +392,20 @@ export class EvolutionProvider implements WaProvider {
         };
       }
 
-      case "create-group":
+      case "create-group": {
+        // Shape canônico = dialeto Z-API {groupName, phones}; aliases antigos preservados.
+        const phones: string[] = params.phones ?? params.participants ?? [];
         return {
           url: this.u(creds, "group/create"),
           method: "POST",
           headers,
-          body: JSON.stringify({ subject: params.subject, participants: params.participants }),
+          body: JSON.stringify({
+            subject: params.groupName ?? params.subject,
+            participants: phones.map(pJid),
+            ...(params.description ? { description: params.description } : {}),
+          }),
         };
+      }
 
       case "add-participant":
       case "remove-participant":
@@ -392,15 +415,115 @@ export class EvolutionProvider implements WaProvider {
           : action === "remove-admin" ? "demote"
           : action === "add-participant" ? "add"
           : "remove";
-        const groupJid = params.phone ?? "";
-        const encodedJid = encodeURIComponent(groupJid);
+        const phones: string[] = params.phones ?? params.participants ?? [];
         return {
-          url: `${this.u(creds, "group/updateParticipant")}?groupJid=${encodedJid}`,
+          url: `${this.u(creds, "group/updateParticipant")}?groupJid=${gjid(params.groupId ?? params.phone)}`,
           method: "POST",
           headers,
-          body: JSON.stringify({ action: evoAction, participants: params.participants }),
+          body: JSON.stringify({ action: evoAction, participants: phones.map(pJid) }),
         };
       }
+
+      case "update-group-name":
+        return {
+          url: `${this.u(creds, "group/updateGroupSubject")}?groupJid=${gjid(params.groupId ?? params.phone)}`,
+          method: "POST",
+          headers,
+          body: JSON.stringify({ subject: params.groupName ?? params.subject }),
+        };
+
+      case "update-group-description":
+        return {
+          url: `${this.u(creds, "group/updateGroupDescription")}?groupJid=${gjid(params.groupId ?? params.phone)}`,
+          method: "POST",
+          headers,
+          body: JSON.stringify({ description: params.groupDescription ?? params.description }),
+        };
+
+      case "update-group-photo":
+        return {
+          url: `${this.u(creds, "group/updateGroupPicture")}?groupJid=${gjid(params.groupId ?? params.phone)}`,
+          method: "POST",
+          headers,
+          body: JSON.stringify({ image: params.groupPhoto ?? params.image }),
+        };
+
+      case "update-group-settings": {
+        // Z-API manda os 4 flags de uma vez; Evolution aceita 1 action por chamada.
+        // O caller (mcp-api) despacha uma chamada por flag; aqui traduzimos 1 flag → action.
+        const hasMsg = typeof params.adminOnlyMessage === "boolean";
+        const hasSet = typeof params.adminOnlySettings === "boolean";
+        // 2 flags na mesma chamada: recusar (null → not_supported) em vez de aplicar só a
+        // primeira em silêncio — caller direto do wa-proxy precisa despachar uma por vez.
+        if (hasMsg && hasSet) return null;
+        const evoSetting = hasMsg
+          ? (params.adminOnlyMessage ? "announcement" : "not_announcement")
+          : hasSet
+            ? (params.adminOnlySettings ? "locked" : "unlocked")
+            : null;
+        if (!evoSetting) return null; // requireAdminApproval/adminOnlyAddMember: sem equivalente
+        return {
+          url: `${this.u(creds, "group/updateSetting")}?groupJid=${gjid(params.phone ?? params.groupId)}`,
+          method: "POST",
+          headers,
+          body: JSON.stringify({ action: evoSetting }),
+        };
+      }
+
+      case "toggle-ephemeral":
+        return {
+          url: `${this.u(creds, "group/toggleEphemeral")}?groupJid=${gjid(params.groupId ?? params.phone)}`,
+          method: "POST",
+          headers,
+          body: JSON.stringify({ expiration: params.expiration ?? 0 }),
+        };
+
+      case "leave-group":
+        return {
+          url: `${this.u(creds, "group/leaveGroup")}?groupJid=${gjid(params.groupId ?? params.phone)}`,
+          method: "DELETE",
+          headers,
+        };
+
+      case "group-metadata":
+        return {
+          url: `${this.u(creds, "group/findGroupInfos")}?groupJid=${gjid(params.groupId ?? params.phone)}`,
+          method: "GET",
+          headers,
+        };
+
+      case "group-invitation-link":
+        return {
+          url: `${this.u(creds, "group/inviteCode")}?groupJid=${gjid(params.groupId ?? params.phone)}`,
+          method: "GET",
+          headers,
+        };
+
+      case "redefine-invitation-link":
+        return {
+          url: `${this.u(creds, "group/revokeInviteCode")}?groupJid=${gjid(params.groupId ?? params.phone)}`,
+          method: "POST",
+          headers,
+        };
+
+      case "group-invitation-metadata":
+        return {
+          url: `${this.u(creds, "group/inviteInfo")}?inviteCode=${inviteCode(params)}`,
+          method: "GET",
+          headers,
+        };
+
+      case "accept-invite":
+        return {
+          url: `${this.u(creds, "group/acceptInviteCode")}?inviteCode=${inviteCode(params)}`,
+          method: "GET",
+          headers,
+        };
+
+      // Fila de aprovação de entrada: só Z-API
+      case "approve-participant":
+      case "reject-participant":
+        return null;
 
       case "status":
         return {

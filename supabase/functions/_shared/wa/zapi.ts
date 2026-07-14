@@ -4,7 +4,7 @@ import type {
 } from "./types.ts";
 import type { WaProvider } from "./provider.ts";
 import { registerProvider } from "./provider.ts";
-import { isLidJid } from "./jid.ts";
+import { digitsFromJid, isLidJid } from "./jid.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -444,12 +444,48 @@ export class ZapiProvider implements WaProvider {
       return { url: `${base}/${action}${qs.toString() ? `?${qs.toString()}` : ""}`, method: "GET", headers };
     }
 
+    // ── Grupos ──
+    // Id canônico aceita "1203...@g.us", "1203...-group" ou dígitos → dialeto Z-API "-group".
+    const gid = (v: unknown) => `${digitsFromJid(String(v ?? ""))}-group`;
+
+    // Endpoints de grupo com id/url fora do body (o generic POST não serve).
+    // gid() só produz dígitos+sufixo fixo — input nunca entra cru no path.
+    switch (action) {
+      case "group-metadata":
+        return { url: `${base}/group-metadata/${gid(p.groupId ?? p.phone)}`, method: "GET", headers };
+      case "group-invitation-link":
+        return { url: `${base}/group-invitation-link/${gid(p.groupId ?? p.phone)}`, method: "GET", headers };
+      case "group-invitation-metadata":
+        return { url: `${base}/group-invitation-metadata?url=${encodeURIComponent(String(p.url ?? ""))}`, method: "GET", headers };
+      case "accept-invite":
+        return { url: `${base}/accept-invite-group?url=${encodeURIComponent(String(p.url ?? ""))}`, method: "GET", headers };
+      case "redefine-invitation-link":
+        return { url: `${base}/redefine-invitation-link/${gid(p.groupId ?? p.phone)}`, method: "POST", headers };
+      case "toggle-ephemeral":
+        return null; // Z-API não tem mensagens temporárias
+    }
+
+    // Ações de grupo via POST genérico: normaliza o id pro dialeto Z-API antes.
+    const GROUP_POST_ACTIONS = new Set<WaAction>([
+      "create-group", "add-participant", "remove-participant", "add-admin", "remove-admin",
+      "approve-participant", "reject-participant", "leave-group",
+      "update-group-name", "update-group-description", "update-group-photo",
+    ]);
+    if (GROUP_POST_ACTIONS.has(action) && action !== "create-group") {
+      p.groupId = gid(p.groupId ?? p.phone);
+      delete p.phone;
+    }
+    if (action === "update-group-settings") {
+      p.phone = gid(p.phone ?? p.groupId); // dialeto deste endpoint: campo "phone"
+      delete p.groupId;
+    }
+
     // Generic case: POST /{action} with full params as body
     return {
       url: `${base}/${action}`,
       method: "POST",
       headers,
-      body: JSON.stringify(params),
+      body: JSON.stringify(p),
     };
   }
 
