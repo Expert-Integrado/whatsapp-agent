@@ -451,6 +451,11 @@ function messagePreview(msg: any) {
     message_ts_brt: toBRT(msg.message_ts),
   };
 }
+// Grupo (@g.us / -group) passa cru — strip do sufixo faria o adapter reconstruir como 1:1 (@s.whatsapp.net).
+function phoneForAction(chatId: unknown): string {
+  const s = String(chatId ?? "");
+  return s.endsWith("@g.us") || s.endsWith("-group") ? s : s.replace(/@.*$/, "");
+}
 
 // ─── Canonicalizacao do 9o digito (bug do chat fantasma — ClickUp 86ajby187) ──
 // Contas BR antigas sao registradas SEM o 9o digito. Enviar pro numero com 9
@@ -1226,7 +1231,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         } else {
           return json({ error: "Forneca message_id OU chat (com target opcional)." }, 400);
         }
-        const phone = String(msg.chat_id).replace(/@.*$/, "");
+        const phone = phoneForAction(msg.chat_id);
         const { status, data } = await callEdge("wa-proxy", { action: "send-reaction", params: { phone, messageId: msg.provider_msg_id, reaction: emoji }, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         // Preview da mensagem alvo: confirma que reagiu na certa sem precisar de read.
@@ -1256,7 +1261,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const ageMs = Date.now() - (msg.message_ts ? new Date(msg.message_ts).getTime() : 0);
         if (ageMs > 15 * 60 * 1000) return json({ error: `Janela de 15min expirada. Use delete + send.` }, 400);
         if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id: msg.id, target_message: messagePreview(msg), new_content, instruction: "Mostre a mensagem e o novo texto ao usuario; reenvie com confirmed:true e ESTE message_id apos ele confirmar." });
-        const phone = String(msg.chat_id).replace(/@.*$/, "");
+        const phone = phoneForAction(msg.chat_id);
         const { status, data } = await callEdge("wa-proxy", { action: "send-text", params: { phone, message: new_content, editMessageId: msg.provider_msg_id }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         await supabase.from("messages").update({ content: new_content, is_edited: true }).eq("id", msg.id);
@@ -1279,7 +1284,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           return json({ error: "Forneca message_id OU chat (com target opcional)." }, 400);
         }
         if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id: msg.id, target_message: messagePreview(msg), instruction: "Confirme com o usuario antes de apagar; reenvie com confirmed:true e ESTE message_id." });
-        const phone = String(msg.chat_id).replace(/@.*$/, "");
+        const phone = phoneForAction(msg.chat_id);
         const { status, data } = await callEdge("wa-proxy", { action: "delete-message", params: { phone, messageId: msg.provider_msg_id, owner: !!msg.from_me }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         await supabase.from("messages").update({ is_deleted: true }).eq("id", msg.id);
@@ -1298,7 +1303,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           if (r.error) return json({ ok: false, error: r.error }, r.status ?? 400);
           if (r.candidates) return json({ ok: true, ambiguous: true, candidates: r.candidates });
           zparams.messageId = r.msg.provider_msg_id;
-          zparams.messagePhone = String(r.msg.chat_id).replace(/@.*$/, "");
+          zparams.messagePhone = phoneForAction(r.msg.chat_id);
           zparams._target_message = messagePreview(r.msg);
           delete zparams.from_chat; delete zparams.target;
         }
