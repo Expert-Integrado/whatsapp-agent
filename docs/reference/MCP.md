@@ -53,7 +53,7 @@ Categoria: **read** (consulta), **write** (altera metadados no banco), **destruc
 | `schedule` | destructive | ✅ | Agenda uma **sequência** de 1–10 mensagens (texto/mídia/voz TTS/enquete) pra envio único futuro. Confirmação na **criação**; o disparo (worker `dispatch-scheduled`, cron 1/min) roda sem novo gate |
 | `send` | destructive | ✅ | Envia texto/mídia para contato/grupo |
 | `send_voice` | destructive | ✅ | Gera TTS (ElevenLabs) e envia como PTT |
-| `edit_message` | destructive | ✅ | Edita texto de uma mensagem sua (janela ~15 min) |
+| `edit_message` | destructive | ✅ | Edita texto/legenda de uma mensagem sua — texto, imagem, video ou documento (janela ~15 min) |
 | `delete_message` | destructive | ✅ | Apaga uma mensagem sua (para todos) |
 | `zapi_action` | destructive | ✅* | Ação avançada do provider não coberta pelas tools. *Confirmação só para actions de envio |
 

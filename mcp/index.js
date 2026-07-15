@@ -1003,10 +1003,10 @@ Passe so o campo que quer atualizar — o outro permanece inalterado.`,
 // ─── 10. edit_message ─────────────────────────────────────────────────────────
 server.tool(
   "edit_message",
-  `Edita o texto de uma mensagem enviada por voce.
-Use para: "corrige aquela msg que mandei pro Marcos", "edita a ultima mensagem que enviei".
+  `Edita o texto/legenda de uma mensagem enviada por voce.
+Use para: "corrige aquela msg que mandei pro Marcos", "edita a ultima mensagem que enviei", "corrige a legenda daquela imagem".
 Precisa do message_id (UUID da tabela messages) — obtenha via read ou search.
-Funciona apenas em mensagens de texto enviadas por voce (from_me=true).`,
+Funciona em mensagens enviadas por voce (from_me=true) do tipo texto, imagem, video ou documento (edita a legenda/caption nesses 3 ultimos). Audio, figurinha, enquete e localizacao nao sao editaveis (limite da Z-API). Janela de 15min desde o envio.`,
   {
     message_id: z.string().describe("UUID da mensagem (campo id retornado por read/search)"),
     new_content: z.string().describe("Novo texto da mensagem"),

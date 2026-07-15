@@ -368,6 +368,35 @@ Deno.test("zapi.buildAction chats usa GET sem body", () => {
   assertEquals(r!.body, undefined);
 });
 
+// ─── edicao de caption (bug pp6jh1f2gi98 — fix 15/07/2026) ──────────────────
+// Z-API so documenta editMessageId em /send-text; imagem/video/documento usam
+// edit{Tipo}MessageId no proprio endpoint de envio do tipo (docs developer.z-api.io).
+
+Deno.test("zapi.buildAction send-image com editImageMessageId → POST /send-image", () => {
+  const r = z.buildAction(creds, "send-image", { phone: "5511", caption: "novo texto", editImageMessageId: "MSGID123" });
+  assertEquals(r!.method, "POST");
+  assertEquals(r!.url.endsWith("/send-image"), true);
+  const body = JSON.parse(r!.body as string);
+  assertEquals(body.caption, "novo texto");
+  assertEquals(body.editImageMessageId, "MSGID123");
+});
+
+Deno.test("zapi.buildAction send-video com editVideoMessageId → POST /send-video", () => {
+  const r = z.buildAction(creds, "send-video", { phone: "5511", caption: "novo texto", editVideoMessageId: "MSGID456" });
+  assertEquals(r!.method, "POST");
+  assertEquals(r!.url.endsWith("/send-video"), true);
+  const body = JSON.parse(r!.body as string);
+  assertEquals(body.editVideoMessageId, "MSGID456");
+});
+
+Deno.test("zapi.buildAction send-document com editDocumentMessageId → POST /send-document/pdf", () => {
+  const r = z.buildAction(creds, "send-document", { phone: "5511", caption: "novo texto", editDocumentMessageId: "MSGID789" });
+  assertEquals(r!.method, "POST");
+  assertEquals(r!.url.endsWith("/send-document/pdf"), true);
+  const body = JSON.parse(r!.body as string);
+  assertEquals(body.editDocumentMessageId, "MSGID789");
+});
+
 
 Deno.test("zapi.parseConnection lê connected/smartphoneConnected", () => {
   assertEquals(z.parseConnection({ connected: true }).connected, true);

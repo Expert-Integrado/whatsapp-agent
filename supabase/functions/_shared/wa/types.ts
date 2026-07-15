@@ -10,6 +10,7 @@ export type WaAction =
   | "status" | "chats" | "contacts" | "get-contact-info" | "phone-exists" | "get-business-profile"
   | "read-chat" | "read-message" | "send-reaction"
   | "send-text" | "send-poll" | "forward"
+  | "send-image" | "send-video" | "send-document" // só usados p/ edição de caption (editImageMessageId etc, Z-API); envio normal passa por buildSend
   | "delete-message" | "block-contact"
   | "create-group" | "add-participant" | "remove-participant"
   | "add-admin" | "remove-admin";

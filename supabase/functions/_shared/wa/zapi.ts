@@ -444,6 +444,18 @@ export class ZapiProvider implements WaProvider {
       return { url: `${base}/${action}${qs.toString() ? `?${qs.toString()}` : ""}`, method: "GET", headers };
     }
 
+    // send-document usa path /send-document/pdf na Z-API (mesmo port de buildSend
+    // case "document" acima) — só chega aqui via edit_message (editDocumentMessageId),
+    // nunca no envio normal (que passa por buildSend).
+    if (action === "send-document") {
+      return {
+        url: `${base}/send-document/pdf`,
+        method: "POST",
+        headers,
+        body: JSON.stringify(params),
+      };
+    }
+
     // Generic case: POST /{action} with full params as body
     return {
       url: `${base}/${action}`,

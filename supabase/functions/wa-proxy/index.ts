@@ -61,6 +61,9 @@ const DESTRUCTIVE_SEND_ACTIONS = new Set([
   "send-poll",
   "forward",           // canônico Z-API (substitui forward-message)
   "forward-message",   // alias retrocompat
+  "send-image",        // só via edit_message (editImageMessageId) — envio normal usa /send-message
+  "send-video",        // só via edit_message (editVideoMessageId) — envio normal usa /send-message
+  "send-document",     // só via edit_message (editDocumentMessageId) — envio normal usa /send-message
 ]);
 
 // DESTRUCTIVE outras (rate limit só global)

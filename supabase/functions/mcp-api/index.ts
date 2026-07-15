@@ -430,7 +430,7 @@ async function resolveTargetMessage(chat: string, target: string, instance?: str
   if (resolved.candidates) return { candidates: resolved.candidates };
   const chatIdSet = await expandChatIdsViaLidMapping(resolved.chat_id, resolved.instance_id);
   let q = supabase.from("messages")
-    .select("id,provider_msg_id,chat_id,instance_id,content,message_type,from_me,message_ts")
+    .select("id,provider_msg_id,chat_id,instance_id,content,caption,message_type,from_me,message_ts")
     .in("chat_id", chatIdSet)
     .not("provider_msg_id", "is", null)
     .not("provider_msg_id", "ilike", "pending-%")
@@ -448,6 +448,7 @@ function messagePreview(msg: any) {
   return {
     from_me: msg.from_me, type: msg.message_type,
     content: typeof msg.content === "string" ? msg.content.slice(0, 160) : null,
+    ...(typeof msg.caption === "string" && { caption: msg.caption.slice(0, 160) }),
     message_ts_brt: toBRT(msg.message_ts),
   };
 }
@@ -1247,7 +1248,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         // re-resolve posicional — msg nova no meio mudaria o alvo).
         let msg: any;
         if (message_id) {
-          const { data, error } = await supabase.from("messages").select("id,provider_msg_id,chat_id,from_me,message_ts,message_type,content,instance_id").eq("id", message_id).single();
+          const { data, error } = await supabase.from("messages").select("id,provider_msg_id,chat_id,from_me,message_ts,message_type,content,caption,instance_id").eq("id", message_id).single();
           if (error || !data) return json({ error: error?.message || "mensagem nao encontrada" }, 404);
           msg = data;
         } else if (chat) {
@@ -1259,15 +1260,29 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           return json({ error: "Forneca message_id OU chat (com target opcional)." }, 400);
         }
         if (!msg.from_me) return json({ error: "Nao da pra editar msg de outros." }, 400);
-        if (msg.message_type && msg.message_type !== "text" && msg.message_type !== "chat") return json({ error: `So texto. Tipo: ${msg.message_type}.` }, 400);
+        // Tipos com legenda editavel na Z-API: cada um usa um campo edit*MessageId
+        // proprio (docs developer.z-api.io, verificado 15/07/2026) — texto puro usa
+        // editMessageId em /send-text; imagem/video/documento usam edit{Tipo}MessageId
+        // no endpoint de envio do PROPRIO tipo. Audio/sticker/poll/location seguem sem
+        // suporte (Z-API nao documenta edit pra eles).
+        const EDITABLE: Record<string, { action: string; field: string; bodyKey: string; column: "content" | "caption" }> = {
+          text:     { action: "send-text",     field: "editMessageId",         bodyKey: "message", column: "content" },
+          chat:     { action: "send-text",     field: "editMessageId",         bodyKey: "message", column: "content" },
+          image:    { action: "send-image",    field: "editImageMessageId",    bodyKey: "caption",  column: "caption" },
+          video:    { action: "send-video",    field: "editVideoMessageId",    bodyKey: "caption",  column: "caption" },
+          document: { action: "send-document", field: "editDocumentMessageId", bodyKey: "caption",  column: "caption" },
+        };
+        const rule = EDITABLE[msg.message_type as string];
+        if (!rule) return json({ error: `Tipo "${msg.message_type}" nao suporta edicao (so texto/imagem/video/documento).` }, 400);
         const ageMs = Date.now() - (msg.message_ts ? new Date(msg.message_ts).getTime() : 0);
         if (ageMs > 15 * 60 * 1000) return json({ error: `Janela de 15min expirada. Use delete + send.` }, 400);
         if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id: msg.id, target_message: messagePreview(msg), new_content, instruction: "Mostre a mensagem e o novo texto ao usuario; reenvie com confirmed:true e ESTE message_id apos ele confirmar." });
         const phone = phoneForAction(msg.chat_id);
-        const { status, data } = await callEdge("wa-proxy", { action: "send-text", params: { phone, message: new_content, editMessageId: msg.provider_msg_id }, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
+        const zapiParams: Record<string, unknown> = { phone, [rule.bodyKey]: new_content, [rule.field]: msg.provider_msg_id };
+        const { status, data } = await callEdge("wa-proxy", { action: rule.action, params: zapiParams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
-        await supabase.from("messages").update({ content: new_content, is_edited: true }).eq("id", msg.id);
-        return json({ ok: true, edited: true, message_id: msg.id, new_content });
+        await supabase.from("messages").update({ [rule.column]: new_content, is_edited: true }).eq("id", msg.id);
+        return json({ ok: true, edited: true, message_id: msg.id, new_content, type: msg.message_type });
       }
 
       case "delete_message": {
@@ -1723,7 +1738,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: "edit_message",
-    description: "Edita o texto de uma mensagem enviada por voce (from_me, texto, ate 15min). CAMINHO RAPIDO: chat (+target, default last_sent = sua ultima msg) dispensa read previo. FLUXO: 1a SEM confirmed (bloqueia e devolve preview + message_id); 2a com confirmed:true e ESSE message_id.",
+    description: "Edita o texto/legenda de uma mensagem enviada por voce (from_me, ate 15min). Tipos suportados: texto, imagem, video, documento (edita a legenda nesses 3 ultimos) — audio/figurinha/enquete/localizacao nao sao editaveis (limite Z-API). CAMINHO RAPIDO: chat (+target, default last_sent = sua ultima msg) dispensa read previo. FLUXO: 1a SEM confirmed (bloqueia e devolve preview + message_id); 2a com confirmed:true e ESSE message_id.",
     inputSchema: {
       type: "object",
       properties: {
