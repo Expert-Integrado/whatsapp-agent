@@ -477,9 +477,11 @@ async function canonicalizePhone(digits: string, instanceId: string): Promise<{ 
 }
 
 // delay de digitacao humanizado (portado do mcp/index.js — antes era client-side)
+// Cap em 5s (nao 15s): evita acumulo de atraso em sends paralelos que causava
+// duplicata de envio (task 376drb5eilif, incidente 01/07/2026).
 function humanizedTypingSeconds(type: string, content: string): number {
   const len = (content || "").length;
-  if (type === "text") return Math.min(15, Math.max(1, Math.ceil(len / 30)));
+  if (type === "text") return Math.min(5, Math.max(1, Math.ceil(len / 30)));
   if (type === "audio" || type === "ptt") return 3;
   if (type === "image" || type === "video") return 2;
   return 1; // document

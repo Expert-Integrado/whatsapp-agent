@@ -176,10 +176,13 @@ function err(msg) {
 const server = new McpServer({ name: "whatsapp-agent", version: "2.12.0" });
 
 // Auto-calcula tempo de typing baseado em tipo+content (humanize=true).
-// Heuristica: ~30 chars/seg = velocidade de digitacao confortavel. Cap em 15s (limite Z-API).
+// Heuristica: ~30 chars/seg = velocidade de digitacao confortavel.
+// Cap em 5s (nao 15s): cap alto acumulava atraso em sends paralelos (fila
+// do provider), o Eric nao via a msg chegar e reenviava -> duplicata
+// (incidente 01/07/2026, Sartori/Joao Paulo/Lourivaldo). Task 376drb5eilif.
 function humanizedTypingSeconds(type, content) {
   const len = (content || "").length;
-  if (type === "text")            return Math.min(15, Math.max(1, Math.ceil(len / 30)));
+  if (type === "text")            return Math.min(5, Math.max(1, Math.ceil(len / 30)));
   if (type === "audio" || type === "ptt") return 3;  // "Gravando audio..."
   if (type === "image" || type === "video") return 2;
   return 1; // document
@@ -262,8 +265,8 @@ VOICE GUIDE (CRITICO ANTES DE ENVIAR TEXTO EM NOME DO USER):
 
 Simulacao de comportamento humano (Z-API delayMessage/delayTyping):
 - humanize=true (padrao): calcula automaticamente delay_typing baseado em tamanho+tipo
-  do conteudo (ex: texto curto=1s, texto longo=15s, audio=3s "gravando audio").
-  Override explicito via delay_typing.
+  do conteudo (ex: texto curto=1s, texto longo=5s, audio=3s "gravando audio").
+  Cap em 5s pra nao acumular atraso em sends paralelos. Override explicito via delay_typing.
 - delay_typing (0-15s): tempo mostrando "Digitando..." / "Gravando audio..." pro destinatario
 - delay_message (0-15s): atraso geral antes de enviar (alem do typing)
 
