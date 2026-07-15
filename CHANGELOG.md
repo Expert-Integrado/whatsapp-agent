@@ -2,6 +2,11 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [Unreleased]
+
+### Fixed
+- **`v_chats_with_contact.contact_name` cai pro `sender_name` da mensagem mais recente** quando `chat_name` está vazio (chats `@lid` sem nome próprio). Fecha o item 7 da task de correção de chat novo/LID (caso Leandro Eckhardt): `search`/`resolve_chat` por nome do contato agora encontram o chat mesmo quando ele só existe como `@lid`. Migration `0054`.
+
 ## [3.4.0] — 2026-07-10
 
 Agendamento de mensagens: programe o envio futuro de uma **sequência** de mensagens (1–10 itens em ordem — texto, imagem+legenda, áudio/PTT, vídeo, documento, voz TTS, enquete, link com preview) em qualquer chat e qualquer instância.
