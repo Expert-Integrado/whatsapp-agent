@@ -1119,6 +1119,42 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance });
       }
 
+      case "send_image": {
+        // Imagem GERADA (bytes): hospeda no bucket whatsapp-images + signed URL e
+        // delega pro send-message — espelho do padrao upload+sign do send-voice.
+        // Imagem que ja tem URL publica segue pelo send (type=image), nao por aqui.
+        const { to, image_base64, caption = "", instance, agent_name, confirmed = false } = params;
+        if (!confirmed) return json({ blocked: true, needs_confirmation: true, to, caption: caption || "(sem legenda)", image_bytes_base64: (image_base64 ?? "").length, instruction: "Mostre destinatario + legenda ao usuario e so reenvie com confirmed:true apos ele confirmar." });
+        const b64 = String(image_base64 ?? "").replace(/^data:image\/[a-z+]+;base64,/i, "").replace(/\s/g, "");
+        if (!b64) return json({ error: "image_base64 vazio." }, 400);
+        let bytes: Uint8Array;
+        try {
+          bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        } catch {
+          return json({ error: "image_base64 invalido (nao decodifica)." }, 400);
+        }
+        const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+        if (bytes.length > MAX_IMAGE_BYTES) return json({ error: `Imagem com ${bytes.length} bytes excede o limite de 4MB.` }, 400);
+        // Formato pelos MAGIC BYTES (nunca confiar no prefixo data:): png/jpeg/webp.
+        let ext = "", mime = "";
+        if (bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) { ext = "png"; mime = "image/png"; }
+        else if (bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) { ext = "jpg"; mime = "image/jpeg"; }
+        else if (bytes.length > 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) { ext = "webp"; mime = "image/webp"; }
+        else return json({ error: "Bytes nao sao png, jpeg nem webp (magic bytes desconhecidos)." }, 400);
+        const resolved = await resolveChat(to, instance);
+        if (resolved.error) return json({ ok: false, error: resolved.error });
+        if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
+        const targetInstance = (instance ? await resolveInstanceKey(instance) : null) ?? resolved.instance_id;
+        const storagePath = `outbound/${targetInstance}/${resolved.chat_id}/${crypto.randomUUID()}.${ext}`;
+        const { error: upErr } = await supabase.storage.from("whatsapp-images").upload(storagePath, bytes, { contentType: mime, upsert: false });
+        if (upErr) return json({ error: `Storage upload: ${upErr.message}` }, 500);
+        const { data: signed, error: signErr } = await supabase.storage.from("whatsapp-images").createSignedUrl(storagePath, 3600);
+        if (signErr || !signed?.signedUrl) return json({ error: `Signed URL: ${signErr?.message ?? "sem url"}` }, 500);
+        const { status, data } = await callEdge("send-message", { chat_id: resolved.chat_id, content: caption, message_type: "image", media_url: signed.signedUrl, confirmed: true, agent_name: agent_name || "mcp-api", instance: targetInstance });
+        if (status >= 400) return json({ ok: false, error: data?.error || `send-message ${status}`, detail: data, storage_path: storagePath }, status);
+        return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance, storage_path: storagePath, image: { format: ext, bytes: bytes.length } });
+      }
+
       case "schedule": {
         // Agendamento de sequencia de mensagens (0049). Valida tudo AQUI na criacao;
         // o worker dispatch-scheduled so drena a fila e reusa as edges de envio.
@@ -1618,6 +1654,22 @@ const TOOL_SCHEMAS = [
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
       },
       required: ["to", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "send_image",
+    description: "Envia uma imagem GERADA (bytes em base64) hospedando no bucket proprio (whatsapp-images) e enviando por signed URL — pra imagem que o agente/rotina acabou de criar (grafico, card, countdown) e que nao existe em URL publica. Se a imagem JA tem URL http(s), use send com type=image. Formatos: png, jpeg, webp (detectados pelos bytes); max 4MB decodificado. FLUXO OBRIGATORIO: 1a chamada SEM confirmed (bloqueia e mostra resumo); 2a com confirmed:true apos o usuario confirmar; rotina automatizada ja autorizada pelo dono = confirmed:true direto. Retorno traz message_id (confirme com check_delivery) e storage_path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Destinatario: nome, telefone ou chat_id (o chat precisa existir)" },
+        image_base64: { type: "string", description: "Bytes da imagem em base64 (aceita com ou sem prefixo data:image/...;base64,)" },
+        caption: { type: "string", description: "Legenda da imagem (opcional)" },
+        confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
+        instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
+      },
+      required: ["to", "image_base64"],
       additionalProperties: false,
     },
   },

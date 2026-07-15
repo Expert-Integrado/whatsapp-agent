@@ -432,7 +432,7 @@ Pergunte ONDE ele vai conversar com o agente no dia a dia:
 1. Settings → Connectors → **Add custom connector**.
 2. URL: `https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/mcp-api`
 3. **Advanced settings** → OAuth Client ID/Secret (passo 6).
-4. Conectar → fluxo OAuth auto-aprovado → as 26 tools aparecem.
+4. Conectar → fluxo OAuth auto-aprovado → as 27 tools aparecem.
 
 > Se o dia a dia dele vai ser no chat/celular, a prova final da seção 8 deve rodar POR ESSA conexão — não só pelo header no Claude Code.
 
