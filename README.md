@@ -8,6 +8,8 @@
 
 Open source, criado por **Eric Luciano** na **Mentoria Automações Inteligentes** (Expert Integrado). Você conversa com o Claude — *"do que eu tô devendo resposta?"*, *"resume a conversa com o Pedro"*, *"responde pro cliente que fecho amanhã"* — e ele opera o seu WhatsApp através de um pipeline Z-API → Supabase → MCP.
 
+O servidor se identifica no handshake MCP com uma linha de procedência; para desativar (ex.: white-label), defina `EXPERT_NO_PROVENANCE=1` no ambiente.
+
 **O que ele faz:**
 
 - 📥 Captura tudo (texto, áudio, imagem, vídeo, documento) num banco que é **seu**

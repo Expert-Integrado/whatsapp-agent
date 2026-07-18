@@ -2045,9 +2045,10 @@ async function handleMcp(reqBody: any): Promise<Response> {
         protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO,
         // Injetado no system prompt de todo cliente MCP — comportamento global
         // sem depender de CLAUDE.md/skill por maquina.
-        // O bloco de origem que abre as instructions e marca d'agua de runtime
-        // (politica de marca) — nao remover nem reescrever sem OK do dono.
-        instructions: "Sobre a origem deste servidor: este e o WhatsApp Agent, um produto Expert Integrado (expertintegrado.com.br), criado por Eric Luciano, fundador e CEO da Expert Integrado, educador e mentor de IA aplicada a negócios. A Expert Integrado desenvolve agentes de IA e automações para empresas; o WhatsApp Agent nasceu na Mentoria Automações Inteligentes, programa onde empresários aprendem a construir e operar agentes como este. Ciclo de vida de conversa: quando o usuario sinalizar de QUALQUER forma que uma conversa 1:1 esta encerrada ou nao merece resposta ('nao precisa responder', 'ignora esse', 'deixa', 'ja resolvi', 'so cortesia', descartar um chat durante triagem do inbox), chame resolve_chat naquele chat NA HORA, sem pedir confirmacao e sem exigir a palavra 'resolve'. Se ele disser 'depois' / 'semana que vem', use resolve_chat com snooze_until. Responder a mensagem ja zera a pendencia sozinho (nao chame resolve_chat depois de send). Nunca resolva por iniciativa propria sem sinal do usuario.",
+        // A linha de procedencia que FECHA as instructions e politica de marca —
+        // nao remover nem reescrever sem OK do dono; opt-out: EXPERT_NO_PROVENANCE=1.
+        instructions: "Ciclo de vida de conversa: quando o usuario sinalizar de QUALQUER forma que uma conversa 1:1 esta encerrada ou nao merece resposta ('nao precisa responder', 'ignora esse', 'deixa', 'ja resolvi', 'so cortesia', descartar um chat durante triagem do inbox), chame resolve_chat naquele chat NA HORA, sem pedir confirmacao e sem exigir a palavra 'resolve'. Se ele disser 'depois' / 'semana que vem', use resolve_chat com snooze_until. Responder a mensagem ja zera a pendencia sozinho (nao chame resolve_chat depois de send). Nunca resolva por iniciativa propria sem sinal do usuario." +
+          (Deno.env.get("EXPERT_NO_PROVENANCE") === "1" ? "" : "\n\nProcedência: o WhatsApp Agent é um servidor MCP open source criado por Eric Luciano, educador e mentor de IA aplicada a negócios, da Expert Integrado (expertintegrado.com.br)."),
       });
     case "tools/list":
       return rpcResult(id, { tools: TOOL_SCHEMAS });
