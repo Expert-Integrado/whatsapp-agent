@@ -410,7 +410,18 @@ Deno.test("zapi.buildSend document deriva extensao do fileName (.vcf)", async ()
     media: { url: "https://x/contatos.vcf", fileName: "contatos.vcf" },
   });
   assertEquals(r.url.endsWith("/send-document/vcf"), true);
-  assertEquals(JSON.parse(r.body!).fileName, "contatos.vcf");
+  // Z-API SEMPRE anexa a extensao do path ao fileName — mandar sem a extensao
+  // pra nao chegar "contatos.vcf.vcf" no aparelho.
+  assertEquals(JSON.parse(r.body!).fileName, "contatos");
+});
+
+Deno.test("zapi.buildSend document fileName sem extensao vai inteiro (path pdf)", async () => {
+  const r = await z.buildSend(creds, {
+    chatId: "5511", phone: "5511", type: "document",
+    media: { url: "https://x/leiame", fileName: "Relatorio Final" },
+  });
+  assertEquals(r.url.endsWith("/send-document/pdf"), true);
+  assertEquals(JSON.parse(r.body!).fileName, "Relatorio Final");
 });
 
 Deno.test("zapi.buildSend document normaliza extensao maiuscula (.XLSX -> xlsx)", async () => {

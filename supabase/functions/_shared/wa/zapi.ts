@@ -254,11 +254,17 @@ export class ZapiProvider implements WaProvider {
         break;
       case "document": {
         const fileName = msg.media?.fileName ?? msg.content ?? "document.pdf";
-        endpoint = `${base}/send-document/${docExt(fileName)}`;
+        const ext = docExt(fileName);
+        // Z-API SEMPRE anexa a extensao do path ao fileName — manda o nome sem
+        // a extensao pra nao chegar "arquivo.vcf.vcf" no aparelho.
+        const baseName = fileName.toLowerCase().endsWith(`.${ext}`)
+          ? fileName.slice(0, -(ext.length + 1))
+          : fileName;
+        endpoint = `${base}/send-document/${ext}`;
         zapiBody = {
           phone,
           document: mediaUrl,
-          fileName,
+          fileName: baseName,
           ...(msg.media?.fileName && msg.content ? { caption: msg.content } : {}),
           ...(resolvedQuotedId && { messageId: resolvedQuotedId }),
         };
