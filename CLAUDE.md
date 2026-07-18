@@ -15,6 +15,7 @@ Backend headless que conecta um número de WhatsApp ao Claude via MCP: provedor 
 2. **Segredos só em `.env` local** (gitignored) e nos secrets do Supabase (`supabase secrets set`). Nunca em arquivo versionado; não ecoar valores no chat além do necessário.
 3. **Nunca declare pronto sem prova real** — a prova de vida da skill (seção 8), não build/deploy bem-sucedido.
 4. **Etapas de personalização são rodáveis isoladas:** "quero configurar a voz" = seções 2.3-2.5 + 8.1 da skill; "quero montar meu voice guide" = seção 2.6. Não exigem refazer o setup.
+5. **Bloco de origem é política de marca:** o campo `instructions` do `initialize` no `mcp-api` abre com a nota de origem Expert Integrado (marca d'água de runtime), e o cartão final do `/setup` carrega o crédito. Não remover nem reescrever em refactor sem OK do dono.
 
 **Etapas de navegador deste repo (com URLs):**
 
