@@ -6,7 +6,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { HARD_RULES, checkVoiceViolations, checkSoftSignals, computeVoiceScore } from "./voice-check.js";
+import { HARD_RULES, compileCustomRules, checkVoiceViolations, checkSoftSignals, computeVoiceScore } from "./voice-check.js";
 
 // Load local .env if present (dev/local override, gitignored)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -160,6 +160,46 @@ function findVoiceGuide() {
 // vivem em ./voice-check.js (modulo puro, importado no topo do arquivo) —
 // extraido pra ser testavel via test-voice.js sem precisar bootstrapar o
 // server MCP inteiro (env vars, 1Password, stdio transport).
+
+// ─── CHECKS PESSOAIS (runtime) ───────────────────────────────────────────────
+// As regras hard PESSOAIS do dono nao vivem mais no codigo: vem do checks.json
+// do voice guide (mesmo formato que a edge le de voice_guide.checks). Procura:
+// VOICE_GUIDE_CHECKS_PATH env > checks.json ao lado de cada candidato do
+// voice-guide.md. Cache por mtime: editar o arquivo recarrega SEM reiniciar o MCP.
+
+const VOICE_CHECKS_CANDIDATES = [
+  process.env.VOICE_GUIDE_CHECKS_PATH,
+  ...VOICE_GUIDE_CANDIDATES.map(p => path.join(path.dirname(p), "checks.json")),
+].filter(Boolean);
+
+let _checksCache = { path: null, mtimeMs: 0, data: null };
+
+function loadVoiceChecks() {
+  for (const candidate of VOICE_CHECKS_CANDIDATES) {
+    try {
+      const stat = fs.statSync(candidate);
+      if (_checksCache.path === candidate && _checksCache.mtimeMs === stat.mtimeMs) {
+        return { path: candidate, data: _checksCache.data };
+      }
+      const data = JSON.parse(fs.readFileSync(candidate, "utf8"));
+      _checksCache = { path: candidate, mtimeMs: stat.mtimeMs, data };
+      return { path: candidate, data };
+    } catch { /* arquivo ausente ou JSON invalido: tenta o proximo */ }
+  }
+  return null;
+}
+
+// Regras pessoais compiladas + soft config, prontas pro motor. Compilacao e
+// barata (so recompila quando o arquivo muda, via cache do loadVoiceChecks).
+let _rulesCache = { data: null, rules: [] };
+function loadCustomRules() {
+  const checks = loadVoiceChecks();
+  if (!checks) return { rules: [], soft: null, path: null };
+  if (_rulesCache.data !== checks.data) {
+    _rulesCache = { data: checks.data, rules: compileCustomRules(checks.data) };
+  }
+  return { rules: _rulesCache.rules, soft: checks.data?.soft ?? null, path: checks.path };
+}
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -344,8 +384,9 @@ FLUXO OBRIGATORIO (duas chamadas):
       // Voice guide check — WARNING only, roda local (so texto, envio real).
       let voiceWarning = null;
       if (type === "text" && content && !r.blocked && !r.ambiguous) {
-        const violations = checkVoiceViolations(content);
-        const softWarnings = checkSoftSignals(content);
+        const custom = loadCustomRules();
+        const violations = checkVoiceViolations(content, custom.rules);
+        const softWarnings = checkSoftSignals(content, custom.soft);
         if (violations.length > 0 || softWarnings.length > 0) {
           const guide = findVoiceGuide();
           voiceWarning = {
@@ -354,6 +395,7 @@ FLUXO OBRIGATORIO (duas chamadas):
             soft_warnings: softWarnings,
             voice_guide_loaded: !!guide,
             voice_guide_path: guide?.path,
+            custom_rules_loaded: custom.rules.length,
             note: "Mensagem foi enviada mesmo assim. Pra proxima, considere reescrever respeitando regras hard. Use get_voice_guide() pra ler o documento.",
           };
         } else if (findVoiceGuide()) {
@@ -840,8 +882,9 @@ Cabe a Claude decidir reescrever ou prosseguir consciente.`,
       .describe("Estrato/audiencia da mensagem (ver voice guide secao 3). Informativo — nao muda quais regras rodam, mas e ecoado no retorno pra contexto."),
   },
   async ({ content, estrato }) => {
-    const violations = checkVoiceViolations(content);
-    const softWarnings = checkSoftSignals(content);
+    const custom = loadCustomRules();
+    const violations = checkVoiceViolations(content, custom.rules);
+    const softWarnings = checkSoftSignals(content, custom.soft);
     const score = computeVoiceScore(violations, softWarnings);
     const guide = findVoiceGuide();
 
@@ -852,6 +895,8 @@ Cabe a Claude decidir reescrever ou prosseguir consciente.`,
         soft_warnings: [],
         score,
         estrato: estrato ?? null,
+        custom_rules_loaded: custom.rules.length,
+        checks_path: custom.path,
         message: "Nenhuma violacao hard nem soft warning detectados. Texto compativel com voice guide.",
       });
     }
@@ -864,6 +909,8 @@ Cabe a Claude decidir reescrever ou prosseguir consciente.`,
       estrato: estrato ?? null,
       voice_guide_loaded: !!guide,
       voice_guide_path: guide?.path,
+      custom_rules_loaded: custom.rules.length,
+      checks_path: custom.path,
       hint: score < 7
         ? "Score abaixo de 7: considere regenerar a mensagem. Use get_voice_guide() pra ler o documento completo e reescrever respeitando as regras hard."
         : "Score aceitavel, mas revise os warnings antes de enviar se houver algum.",
@@ -902,8 +949,20 @@ ou quando get_voice_guide() retornar setup pendente.`,
       lines.push("Template inicial disponivel em voice-guide-template.md na pasta do MCP.");
     }
     lines.push("");
-    lines.push("Regras hard ativas (regex bloqueio nivel WARNING — send executa mesmo com violacao):");
+    lines.push("Regras hard UNIVERSAIS (motor generico — send executa mesmo com violacao, e warning):");
     HARD_RULES.forEach(r => lines.push(`  - [${r.severity}] ${r.id}: ${r.message.split(".")[0]}`));
+    {
+      const custom = loadCustomRules();
+      lines.push("");
+      if (custom.rules.length) {
+        lines.push(`Regras hard PESSOAIS carregadas em runtime de ${custom.path} (recarrega ao editar, sem reiniciar):`);
+        custom.rules.forEach(r => lines.push(`  - [${r.severity}] ${r.id}: ${r.message.split(".")[0]}`));
+      } else {
+        lines.push("Regras hard PESSOAIS: nenhuma carregada. Crie um checks.json (formato de voice_guide.checks:");
+        lines.push("hard_rules com { id, pattern, flags, severity, message }) ao lado do voice-guide.md ou");
+        lines.push("aponte VOICE_GUIDE_CHECKS_PATH no env.");
+      }
+    }
     return ok({ status: guide ? "active" : "not_configured", info: lines.join("\n") });
   }
 );

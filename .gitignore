@@ -15,3 +15,6 @@ supabase/.temp/
 .playwright-mcp/
 Ctmp*
 .meetings-cursor.json
+
+# Teste de integracao com os casos PESSOAIS do dono (carrega o checks.json real) — nunca versionar
+mcp/test-checks-local.js
