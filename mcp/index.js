@@ -101,7 +101,7 @@ if (!SUPABASE_URL || !process.env.MCP_API_KEY) {
   console.error([
     "ERRO: SUPABASE_URL e MCP_API_KEY sao obrigatorios.",
     "Configure no bloco \"env\" do mcpServers em ~/.claude.json:",
-    '  SUPABASE_URL  = https://gmpurkzxtvzqlvkqwjkp.supabase.co',
+    '  SUPABASE_URL  = https://SEU_PROJECT_ID.supabase.co',
     "  MCP_API_KEY   = (chave da edge mcp-api; 1Password)",
   ].join("\n"));
   process.exit(1);
