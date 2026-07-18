@@ -6,7 +6,7 @@
 
 **[→ Como funciona o WhatsApp Agent](https://expert-integrado.github.io/whatsapp-agent/)** — a página do projeto, com o sistema explicado visualmente.
 
-Open source, parte da mentoria **Expert Integrado**. Você conversa com o Claude — *"do que eu tô devendo resposta?"*, *"resume a conversa com o Pedro"*, *"responde pro cliente que fecho amanhã"* — e ele opera o seu WhatsApp através de um pipeline Z-API → Supabase → MCP.
+Open source, criado por **Eric Luciano** na **Mentoria Automações Inteligentes** (Expert Integrado). Você conversa com o Claude — *"do que eu tô devendo resposta?"*, *"resume a conversa com o Pedro"*, *"responde pro cliente que fecho amanhã"* — e ele opera o seu WhatsApp através de um pipeline Z-API → Supabase → MCP.
 
 **O que ele faz:**
 

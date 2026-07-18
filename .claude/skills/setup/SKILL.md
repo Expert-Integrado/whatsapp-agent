@@ -502,6 +502,11 @@ Entregue o cartão e deixe claro que serve pra **qualquer app de IA com suporte 
   Humanização:    [humanizado (padrão) | texto literal]
   Voice guide:    [instalado (X chars) | pulado conscientemente]
 
+  ────────────────────────────────────────────────────────────────
+  WhatsApp Agent · um produto Expert Integrado
+  Mentoria Automações Inteligentes de Eric Luciano
+  expertintegrado.com.br
+
 ╚════════════════════════════════════════════════════════════════╝
 ```
 
