@@ -11,6 +11,7 @@
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { normalizePhoneBR, expandChatIdCandidates, pickPhoneChat } from "../_shared/wa/phone.ts";
+import { evaluateVoiceGate, type VoiceGateMode, type VoiceViolation } from "../_shared/wa/voice-gate.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -105,7 +106,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 let _instCache: any[] | null = null;
 async function loadInstances() {
   if (_instCache) return _instCache;
-  const { data } = await supabase.from("wa_instance").select("instance_id, alias, phone_connected, is_default, is_active, provider");
+  const { data } = await supabase.from("wa_instance").select("instance_id, alias, phone_connected, is_default, is_active, provider, voice_gate");
   _instCache = data || [];
   return _instCache;
 }
@@ -628,6 +629,30 @@ async function loadVoiceGuide(instanceId?: string | null): Promise<any | null> {
   return data ?? null;
 }
 
+// ─── Voice gate server-side (0055) ─────────────────────────────────────────────
+// Ultima linha de defesa da voz: superficies SEM hook local (claude.ai celular/
+// Desktop/Web) chegam direto aqui. Modo por instancia (wa_instance.voice_gate):
+// 'off' ignora, 'warn' (default) anexa voice_warnings sem barrar, 'block' recusa
+// violacao severity=high a menos que confirmed_voice:true (aprovacao explicita do
+// dono). Decisao pura em _shared/wa/voice-gate.ts (testada). loadInstances tem
+// cache por isolate — mudanca de modo pega em minutos, nao precisa redeploy.
+async function runVoiceGate(texts: (string | null | undefined)[], instanceId: string | null | undefined, params: any):
+  Promise<{ block?: Response; warnings?: VoiceViolation[] }> {
+  if (!texts.some((t) => typeof t === "string" && t.trim())) return {};
+  const rows = await loadInstances();
+  const gate = (rows.find((r: any) => r.instance_id === instanceId)?.voice_gate ?? "warn") as VoiceGateMode;
+  if (gate === "off") return {};
+  const g = await loadVoiceGuide(instanceId ?? null);
+  const customRules = compileCustomRules(g?.checks);
+  const r = evaluateVoiceGate({ texts, gate, confirmedVoice: params?.confirmed_voice === true,
+    violationsFor: (t) => checkVoiceViolations(t, customRules) });
+  if (r.blocked) {
+    return { block: json({ ok: false, blocked: true, reason: "voice_gate", violations: r.violations,
+      instruction: "Envio recusado (voice_gate=block): o texto viola regra HARD do voice guide da instancia. Corrija o texto e reenvie. Se o dono ja aprovou o texto exatamente como esta, reenvie com confirmed_voice:true." }) };
+  }
+  return r.violations.length ? { warnings: r.violations } : {};
+}
+
 // ─── Executor de actions (reusado pelo legado {action,params} e pelo MCP tools/call) ───
 async function dispatchAction(action: string, params: any = {}): Promise<Response> {
   try {
@@ -1064,6 +1089,8 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
         if (type !== "text" && !media_url) return json({ error: `media_url obrigatorio pra type "${type}".` }, 400);
         const targetInstance = wantInstance ?? resolved.instance_id;
+        const vg = await runVoiceGate([content], targetInstance, params);
+        if (vg.block) return vg.block;
         if (!force_send_after_inbound && !resolved._new && !resolved.is_group) {
           const rows = await loadInstances();
           const selfPhone = rows.find((i: any) => i.instance_id === targetInstance)?.phone_connected ?? null;
@@ -1100,6 +1127,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const { status, data } = await callEdge("send-message", sendBody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-message ${status}`, detail: data }, status);
         return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance,
+          ...(vg.warnings?.length && { voice_warnings: vg.warnings }),
           ...(resolved._canonicalized_from && { phone_canonicalized: { typed: resolved._canonicalized_from, canonical: resolved.chat_id } }),
           ...(resolved._phone_unverified && { warning: `phone-exists indisponivel (${resolved._phone_unverified}); numero usado como digitado — confirme entrega com check_delivery.` }),
           ...(resolved._new && { delivery_hint: "Primeiro contato: confirme a entrega com check_delivery (message_id) apos alguns segundos." }) });
@@ -1112,11 +1140,13 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (resolved.error) return json({ ok: false, error: resolved.error });
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
         const targetInstance = (instance ? await resolveInstanceKey(instance) : null) ?? resolved.instance_id;
+        const vgv = await runVoiceGate([text], targetInstance, params);
+        if (vgv.block) return vgv.block;
         const vbody: any = { chat_id: resolved.chat_id, text, voice_id, confirmed: true, agent_name: agent_name || "mcp-api", agent_request_id: crypto.randomUUID(), instance: targetInstance,
           ...(profile && { profile }), ...(model_id && { model_id }), ...(stability !== undefined && { stability }), ...(similarity_boost !== undefined && { similarity_boost }), ...(style !== undefined && { style }), ...(speed !== undefined && { speed }) };
         const { status, data } = await callEdge("send-voice", vbody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-voice ${status}`, detail: data }, status);
-        return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance });
+        return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance, ...(vgv.warnings?.length && { voice_warnings: vgv.warnings }) });
       }
 
       case "send_image": {
@@ -1145,6 +1175,8 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (resolved.error) return json({ ok: false, error: resolved.error });
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
         const targetInstance = (instance ? await resolveInstanceKey(instance) : null) ?? resolved.instance_id;
+        const vgi = await runVoiceGate([caption], targetInstance, params);
+        if (vgi.block) return vgi.block;
         const storagePath = `outbound/${targetInstance}/${resolved.chat_id}/${crypto.randomUUID()}.${ext}`;
         const { error: upErr } = await supabase.storage.from("whatsapp-images").upload(storagePath, bytes, { contentType: mime, upsert: false });
         if (upErr) return json({ error: `Storage upload: ${upErr.message}` }, 500);
@@ -1152,7 +1184,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (signErr || !signed?.signedUrl) return json({ error: `Signed URL: ${signErr?.message ?? "sem url"}` }, 500);
         const { status, data } = await callEdge("send-message", { chat_id: resolved.chat_id, content: caption, message_type: "image", media_url: signed.signedUrl, confirmed: true, agent_name: agent_name || "mcp-api", instance: targetInstance });
         if (status >= 400) return json({ ok: false, error: data?.error || `send-message ${status}`, detail: data, storage_path: storagePath }, status);
-        return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance, storage_path: storagePath, image: { format: ext, bytes: bytes.length } });
+        return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance, storage_path: storagePath, image: { format: ext, bytes: bytes.length }, ...(vgi.warnings?.length && { voice_warnings: vgi.warnings }) });
       }
 
       case "schedule": {
@@ -1192,6 +1224,10 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(warning && { warning }),
           instruction: "Mostre destinatario + horario (BRT) + itens ao usuario e so reenvie com confirmed:true apos ele confirmar.",
         });
+        const vgs = await runVoiceGate(
+          items.flatMap((it: any) => [it.content, it.question, ...(Array.isArray(it.options) ? it.options : [])]),
+          targetInstance, params);
+        if (vgs.block) return vgs.block;
         const { data: ins, error: insErr } = await supabase.from("scheduled_sequences").insert({
           instance_id: targetInstance, chat_id: resolved.chat_id, chat_name: resolved.chat_name,
           scheduled_at: when.toISOString(), items, created_by: agent_name || "mcp-api",
@@ -1201,6 +1237,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ok: true, id: ins.id, chat: resolved.chat_name, instance: targetInstance,
           scheduled_at: when.toISOString(), scheduled_at_brt: toBRT(when.toISOString()),
           items_total: items.length, ...(warning && { warning }),
+          ...(vgs.warnings?.length && { voice_warnings: vgs.warnings }),
           hint: "Agendado. Use list_scheduled pra acompanhar e cancel_scheduled(id) pra cancelar enquanto pending.",
         });
       }
@@ -1313,12 +1350,14 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const ageMs = Date.now() - (msg.message_ts ? new Date(msg.message_ts).getTime() : 0);
         if (ageMs > 15 * 60 * 1000) return json({ error: `Janela de 15min expirada. Use delete + send.` }, 400);
         if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id: msg.id, target_message: messagePreview(msg), new_content, instruction: "Mostre a mensagem e o novo texto ao usuario; reenvie com confirmed:true e ESTE message_id apos ele confirmar." });
+        const vge = await runVoiceGate([new_content], msg.instance_id, params);
+        if (vge.block) return vge.block;
         const phone = phoneForAction(msg.chat_id);
         const zapiParams: Record<string, unknown> = { phone, [rule.bodyKey]: new_content, [rule.field]: msg.provider_msg_id };
         const { status, data } = await callEdge("wa-proxy", { action: rule.action, params: zapiParams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         await supabase.from("messages").update({ [rule.column]: new_content, is_edited: true }).eq("id", msg.id);
-        return json({ ok: true, edited: true, message_id: msg.id, new_content, type: msg.message_type });
+        return json({ ok: true, edited: true, message_id: msg.id, new_content, type: msg.message_type, ...(vge.warnings?.length && { voice_warnings: vge.warnings }) });
       }
 
       case "delete_message": {
@@ -1609,6 +1648,7 @@ const TOOL_SCHEMAS = [
         file_name: { type: "string", description: "Nome do arquivo para type=document" },
         reply_to: { type: "string", description: "Mensagem a citar (quote): 'last' | 'last_received' | 'last_sent' (posicional, dispensa read) ou UUID de read/search" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true para enviar; so apos o usuario confirmar" },
+        confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o texto exato apos ver as violacoes — nunca por iniciativa propria" },
         allow_new: { type: "boolean", description: "Permite enviar pra numero novo (primeiro contato); exige instance" },
         humanize: { type: "boolean", description: "Calcula delay_typing automatico por tamanho/tipo (default true)" },
         delay_typing: { type: "number", description: "Override do delay de digitacao (0-15s)" },
@@ -1651,6 +1691,7 @@ const TOOL_SCHEMAS = [
         style: { type: "number", description: "0-1 (default 0.30; ignorado com profile)" },
         speed: { type: "number", description: "0.7-1.2 (default 0.95; ignorado com profile)" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
+        confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o texto exato apos ver as violacoes — nunca por iniciativa propria" },
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
       },
       required: ["to", "text"],
@@ -1667,6 +1708,7 @@ const TOOL_SCHEMAS = [
         image_base64: { type: "string", description: "Bytes da imagem em base64 (aceita com ou sem prefixo data:image/...;base64,)" },
         caption: { type: "string", description: "Legenda da imagem (opcional)" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
+        confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente a legenda exata apos ver as violacoes — nunca por iniciativa propria" },
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
       },
       required: ["to", "image_base64"],
@@ -1800,6 +1842,7 @@ const TOOL_SCHEMAS = [
         new_content: { type: "string", description: "Novo texto" },
         instance: { type: "string", description: "Com chat: instancia quando o chat existe nas duas" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao" },
+        confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o novo texto exato apos ver as violacoes — nunca por iniciativa propria" },
       },
       required: ["new_content"],
       additionalProperties: false,
@@ -1946,6 +1989,7 @@ const TOOL_SCHEMAS = [
         },
         instance: { type: "string", description: "Instancia (alias ou instance_id); default: herda a do chat" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos o usuario confirmar o resumo do agendamento" },
+        confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente os textos exatos apos ver as violacoes — nunca por iniciativa propria" },
       },
       required: ["to", "at", "items"],
       additionalProperties: false,
