@@ -182,6 +182,9 @@ Origem: [0030](../../supabase/migrations/0030_voice_guide.sql). Markdown que des
 ### `scheduled_sequences` — sequências de mensagens agendadas
 Origem: [0049](../../supabase/migrations/0049_scheduled_sequences.sql). Uma linha = uma sequência de 1..10 mensagens (`items` JSONB — shape espelha os params de `send`/`send_voice`/`send-poll`) agendada pra envio único futuro em um chat/instância. Criada pela tool `schedule` da `mcp-api` (gate `confirmed` satisfeito na criação); drenada pelo worker [`dispatch-scheduled`](../../supabase/functions/dispatch-scheduled/index.ts) (cron 1/min). Campos-chave: `scheduled_at` (timestamptz), `status` (`pending`/`processing`/`sent`/`failed`/`canceled`), `items_sent` (cursor de progresso/resume — em falha, o item que falhou é `items[items_sent]`), `error`, `started_at`/`finished_at`. Índice parcial `idx_scheduled_sequences_due` (`scheduled_at WHERE status='pending'`) pro worker. Itens imutáveis: editar = `cancel_scheduled` + `schedule` de novo.
 
+### `voice_bypass_log` — trilha de bypasses do voice gate
+Origem: [0056](../../supabase/migrations/0056_voice_bypass_log.sql). Log **silencioso** de auditoria: uma linha por envio que só passou porque o caller trouxe `confirmed_voice:true` numa instância em `voice_gate='block'` com violação `severity: high`. Grava `instance_id`, `tool` (ex.: `send`, `zapi_action:send-text`), `rule_ids` (regras violadas) e `text_preview` (até 1000 chars). Escrita só pela `mcp-api` (service_role; RLS ligada sem policies); nenhuma notificação — consulta sob demanda quando o dono quiser investigar. Falha no insert nunca derruba o envio (já aprovado pelo dono).
+
 ### Tabelas removidas
 - `presence_events` — removida em [0022](../../supabase/migrations/0022_drop_presence_events.sql) (≈216 MB de dado morto + cron de limpeza).
 - `contacts` e `oauth_tokens` — removidas em [0023](../../supabase/migrations/0023_remove_google_contacts_sync.sql) (sync do Google Contacts nunca foi populado). O CASCADE quebrou views, recriadas em [0024](../../supabase/migrations/0024_recreate_v_chats_with_contact.sql)/[0026](../../supabase/migrations/0026_recreate_v_messages_with_sender.sql).
@@ -317,6 +320,7 @@ Todos rodam em **UTC**. Os que chamam Edge Functions usam `call_edge_function` +
 | 0053 | `voice_guide_skip_tracking` | `wa_instance.voice_guide_skipped_at`: registro do pulo consciente do voice guide no onboarding (distingue de "nunca ofertado") |
 | 0054 | `lid_contact_name_fallback` | Fallback de nome de contato para chats `@lid` sem nome resolvido |
 | 0055 | `instance_voice_gate` | `wa_instance.voice_gate` (`off`/`warn`/`block`, default `warn`): gate de voz server-side no `mcp-api` — última linha de defesa para superfícies sem hook local |
+| 0056 | `voice_bypass_log` | Tabela `voice_bypass_log`: trilha silenciosa de auditoria dos envios liberados com `confirmed_voice:true` em gate `block` (instância, tool, regras, preview do texto) |
 
 ---
 

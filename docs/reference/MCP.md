@@ -31,7 +31,7 @@ O servidor MCP é a Edge Function [`mcp-api`](../../supabase/functions/mcp-api/i
 
 Categoria: **read** (consulta), **write** (altera metadados no banco), **destructive** (age no WhatsApp em seu nome). A coluna *confirma?* indica as tools que exigem `confirmed:true` numa segunda chamada — o Claude mostra destinatário+conteúdo e bloqueia até você confirmar.
 
-Além da confirmação, todo envio de texto passa pelo **voice gate** da instância (`wa_instance.voice_gate`, migration 0055): em `warn` (default) violações *hard* do voice guide voltam como `voice_warnings` sem barrar; em `block` uma violação `severity: high` **recusa o envio** (`send`, `send_voice`, `send_image`, `schedule`, `edit_message` e as actions de envio do `zapi_action`) a menos que a chamada traga `confirmed_voice:true` — flag que só deve ser usada com aprovação explícita do dono para o texto exato; `off` desliga o gate.
+Além da confirmação, todo envio de texto passa pelo **voice gate** da instância (`wa_instance.voice_gate`, migration 0055): em `warn` (default) violações *hard* do voice guide voltam como `voice_warnings` sem barrar; em `block` uma violação `severity: high` **recusa o envio** (`send`, `send_voice`, `send_image`, `schedule`, `edit_message` e as actions de envio do `zapi_action`) a menos que a chamada traga `confirmed_voice:true` — flag que só deve ser usada com aprovação explícita do dono para o texto exato; `off` desliga o gate. Todo envio liberado por `confirmed_voice` em gate `block` fica registrado na tabela `voice_bypass_log` (trilha silenciosa de auditoria, migration 0056 — nenhuma notificação, consulta sob demanda).
 
 | Tool | Categoria | Confirma? | O que faz |
 |---|---|:--:|---|

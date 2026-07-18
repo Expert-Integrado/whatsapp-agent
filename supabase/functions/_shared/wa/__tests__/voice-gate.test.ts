@@ -66,6 +66,30 @@ Deno.test("textos nao-string/vazios sao ignorados sem quebrar", () => {
   assertEquals(r.violations.map((v) => v.id), ["zap"]);
 });
 
+// bypassed = trilha de auditoria (log silencioso): envio que SO passou porque o
+// caller trouxe confirmed_voice:true num gate block com violacao high.
+Deno.test("bypassed: block + confirmed_voice + violacao high marca o bypass", () => {
+  const r = evaluateVoiceGate({ texts: ["me chama no zapx"], gate: "block", confirmedVoice: true, violationsFor });
+  assertEquals(r.blocked, false);
+  assertEquals(r.bypassed, true);
+});
+
+Deno.test("bypassed: confirmed_voice em texto limpo NAO e bypass", () => {
+  const r = evaluateVoiceGate({ texts: ["beleza, seguimos"], gate: "block", confirmedVoice: true, violationsFor });
+  assertEquals(r.bypassed, false);
+});
+
+Deno.test("bypassed: gate warn com violacao high NAO e bypass (nada seria barrado)", () => {
+  const r = evaluateVoiceGate({ texts: ["zapx"], gate: "warn", confirmedVoice: true, violationsFor });
+  assertEquals(r.bypassed, false);
+});
+
+Deno.test("bypassed: bloqueio real (sem confirmed_voice) NAO e bypass", () => {
+  const r = evaluateVoiceGate({ texts: ["zapx"], gate: "block", confirmedVoice: false, violationsFor });
+  assertEquals(r.blocked, true);
+  assertEquals(r.bypassed, false);
+});
+
 Deno.test("gate desconhecido cai no default warn (fail-safe, nao bloqueia)", () => {
   const r = evaluateVoiceGate({ texts: ["zapx"], gate: "banana" as unknown as "warn", confirmedVoice: false, violationsFor });
   assertEquals(r.blocked, false);

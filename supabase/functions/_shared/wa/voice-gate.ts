@@ -15,9 +15,9 @@ export function evaluateVoiceGate(input: {
   gate: VoiceGateMode;
   confirmedVoice: boolean;
   violationsFor: (text: string) => VoiceViolation[];
-}): { blocked: boolean; violations: VoiceViolation[] } {
+}): { blocked: boolean; violations: VoiceViolation[]; bypassed: boolean } {
   const { texts, gate, confirmedVoice, violationsFor } = input;
-  if (gate === "off") return { blocked: false, violations: [] };
+  if (gate === "off") return { blocked: false, violations: [], bypassed: false };
   const strings = texts.filter((t): t is string => typeof t === "string" && t.trim().length > 0);
   const seen = new Set<string>();
   const violations: VoiceViolation[] = [];
@@ -27,5 +27,8 @@ export function evaluateVoiceGate(input: {
     }
   }
   const blocked = gate === "block" && violations.length > 0 && !confirmedVoice;
-  return { blocked, violations };
+  // bypassed = envio que SO passou porque o caller trouxe confirmed_voice num gate
+  // block com violacao high — e o evento que a trilha de auditoria registra.
+  const bypassed = gate === "block" && violations.length > 0 && confirmedVoice;
+  return { blocked, violations, bypassed };
 }
