@@ -12,6 +12,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { normalizePhoneBR, expandChatIdCandidates, pickPhoneChat } from "../_shared/wa/phone.ts";
 import { evaluateVoiceGate, type VoiceGateMode, type VoiceViolation } from "../_shared/wa/voice-gate.ts";
+import { ZAPI_SEND_ACTIONS, zapiGateTexts, scheduleGateTexts, defaultGateInstance } from "../_shared/wa/gate-inputs.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -621,11 +622,16 @@ function computeVoiceScore(violations: any[], softWarnings: any[]): number {
 }
 
 async function loadVoiceGuide(instanceId?: string | null): Promise<any | null> {
+  // Erro de banco NAO pode passar em silencio: sem o log, falha de query fica
+  // indistinguivel de "guide nao configurado" (achado da cirurgica 18/07). O
+  // fallback continua null (gate degrada pras regras universais, envio nao quebra).
   if (instanceId) {
-    const { data } = await supabase.from("voice_guide").select("content,checks,instance_id,updated_at").eq("instance_id", instanceId).maybeSingle();
+    const { data, error } = await supabase.from("voice_guide").select("content,checks,instance_id,updated_at").eq("instance_id", instanceId).maybeSingle();
+    if (error) console.error("[voice_guide] query por instancia falhou:", error.message ?? error);
     if (data) return data;
   }
-  const { data } = await supabase.from("voice_guide").select("content,checks,instance_id,updated_at").is("instance_id", null).maybeSingle();
+  const { data, error } = await supabase.from("voice_guide").select("content,checks,instance_id,updated_at").is("instance_id", null).maybeSingle();
+  if (error) console.error("[voice_guide] query global falhou:", error.message ?? error);
   return data ?? null;
 }
 
@@ -1224,9 +1230,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(warning && { warning }),
           instruction: "Mostre destinatario + horario (BRT) + itens ao usuario e so reenvie com confirmed:true apos ele confirmar.",
         });
-        const vgs = await runVoiceGate(
-          items.flatMap((it: any) => [it.content, it.question, ...(Array.isArray(it.options) ? it.options : [])]),
-          targetInstance, params);
+        const vgs = await runVoiceGate(scheduleGateTexts(items), targetInstance, params);
         if (vgs.block) return vgs.block;
         const { data: ins, error: insErr } = await supabase.from("scheduled_sequences").insert({
           instance_id: targetInstance, chat_id: resolved.chat_id, chat_name: resolved.chat_name,
@@ -1384,7 +1388,8 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       }
 
       case "zapi_action": {
-        const ZAPI_SEND_ACTIONS = new Set(["send-poll", "forward-message", "forward", "edit-message", "send-text", "send-message"]);
+        // ZAPI_SEND_ACTIONS/extracao de texto vivem em _shared/wa/gate-inputs.ts
+        // (funcoes puras com teste proprio — a fiacao daqui nao tem harness).
         const { action: zaction, params: zparams = {}, confirmed = false, instance } = params;
         // forward posicional: from_chat (+target) resolve messageId/messagePhone aqui.
         // Antes o forward era inviavel na pratica: exigia o provider_msg_id, que o
@@ -1406,12 +1411,8 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         // bypass do gate das 5 tools oficiais. Sem `instance` explicita o wa-proxy
         // usa a default, entao o gate resolve pela default tambem (nunca fica sem gate).
         if (ZAPI_SEND_ACTIONS.has(zaction)) {
-          const instRows = await loadInstances();
-          const gateInstance = (instance ? await resolveInstanceKey(instance) : null)
-            ?? instRows.find((r: any) => r.is_default)?.instance_id ?? instRows[0]?.instance_id ?? null;
-          const ztexts = [zparams.message, zparams.body, zparams.text, zparams.caption,
-            ...(Array.isArray((zparams as any).options) ? (zparams as any).options : [])];
-          const vgz = await runVoiceGate(ztexts, gateInstance, params);
+          const gateInstance = defaultGateInstance(await loadInstances(), instance ? await resolveInstanceKey(instance) : null);
+          const vgz = await runVoiceGate(zapiGateTexts(zparams), gateInstance, params);
           if (vgz.block) return vgz.block;
         }
         const { status, data } = await callEdge("wa-proxy", { action: zaction, params: zparams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance });
