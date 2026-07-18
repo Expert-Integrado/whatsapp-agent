@@ -17,7 +17,7 @@
 --   - Suporta metadata (cor, slug, label) em categories e (assigned_at, assigned_by,
 --     confidence) em chat_categories — essencial pra categorizacao LLM-assistida.
 --   - Auto-descoberta via `SELECT slug, label FROM categories ORDER BY label`.
---   - Multi-valor nativo (Camila pode ser pessoal + cliente).
+--   - Multi-valor nativo (um mesmo contato pode ser pessoal + cliente).
 --
 -- NAO foi criada coluna "check de resposta": ja existe last_received_at e
 -- last_sent_at em chats (migration 0008). MCP `inbox` ja computa waiting_on.

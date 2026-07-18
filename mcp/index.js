@@ -821,7 +821,7 @@ server.tool(
   `Verifica se um texto viola alguma regra hard do voice guide do user.
 
 Roda checagem regex contra padroes hard (pronomes, em-dash, hype, saudacoes proibidas,
-validacao afetiva, vocativos inventados pra Camila, concordancia lisa, etc) e retorna
+validacao afetiva, vocativos inventados, concordancia lisa, etc) e retorna
 lista de violacoes detectadas com severidade e sugestao. Roda tambem checks estatisticos
 soft (soft_warnings): assinaturas fortes empilhadas, msg longa sem quebra, burst inflado.
 
@@ -836,7 +836,7 @@ Filosofia: warning, nao bloqueio. send() executa mesmo com violacoes mas inclui 
 Cabe a Claude decidir reescrever ou prosseguir consciente.`,
   {
     content: z.string().describe("Texto a verificar"),
-    estrato: z.enum(["vendas-lead", "cliente", "equipe", "network", "intimo-amigo", "intimo-camila"]).optional()
+    estrato: z.enum(["vendas-lead", "cliente", "equipe", "network", "intimo-amigo", "intimo"]).optional()
       .describe("Estrato/audiencia da mensagem (ver voice guide secao 3). Informativo — nao muda quais regras rodam, mas e ecoado no retorno pra contexto."),
   },
   async ({ content, estrato }) => {
