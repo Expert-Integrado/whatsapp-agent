@@ -305,6 +305,26 @@ curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/dat
 
 > A coluna (migration 0053) distingue "decidiu pular" de "nunca foi ofertado" — sessões futuras não reofertam como se fosse novidade (só relembram se ELE tocar no assunto). O pulo também entra como pendência no cartão final.
 
+### 2.7 Voice gate — o que acontece quando uma mensagem viola o estilo (decisão rápida)
+
+Na sequência do voice guide, pergunte (AskUserQuestion):
+
+> "Quando eu redigir algo em seu nome que viole uma regra grave do seu estilo, o que o servidor deve fazer?"
+> - **Avisar e enviar (recomendado pra começar):** o envio sai e volta com o aviso da violação junto (`warn` — é o padrão).
+> - **Bloquear até você aprovar:** o servidor RECUSA o envio até você ver a violação e aprovar o texto exato (`block` — recomendado pra quem instalou o guide e deixa o agente responder sozinho).
+> - **Desligar:** nenhuma checagem no servidor (`off`).
+
+Aplique a escolha (só é preciso rodar se NÃO for `warn`, que é o default da migration 0055):
+
+```bash
+SQL="UPDATE wa_instance SET voice_gate = '<off|warn|block>' WHERE instance_id = '<INSTANCE_ID>';"
+curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"
+```
+
+> O gate vale pra TODAS as superfícies (Claude Code, Desktop, Web, celular) porque roda dentro da `mcp-api`. Em `block`, o bypass é a flag `confirmed_voice:true` — explique ao dono que ela só deve ser usada quando ELE aprovar o texto exato. Quem pulou o voice guide também se beneficia: as regras universais (em-dash, saudação genérica, hype) valem mesmo sem guide instalado.
+
 ---
 
 ## 3. Secrets das edge functions

@@ -170,6 +170,10 @@ function findVoiceGuide() {
 const VOICE_CHECKS_CANDIDATES = [
   process.env.VOICE_GUIDE_CHECKS_PATH,
   ...VOICE_GUIDE_CANDIDATES.map(p => path.join(path.dirname(p), "checks.json")),
+  // Convencoes genericas (mesma cadeia do hook voice-guard): ao lado do proprio
+  // server e ~/.claude/voice-guide-checks.json — cobre instalacao stdio sem env.
+  path.join(__dirname, "checks.json"),
+  path.join(os.homedir(), ".claude", "voice-guide-checks.json"),
 ].filter(Boolean);
 
 let _checksCache = { path: null, mtimeMs: 0, data: null };

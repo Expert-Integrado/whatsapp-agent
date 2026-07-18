@@ -1,5 +1,17 @@
 # Guia de migração
 
+## Atualização de rotina (qualquer versão)
+
+Instalação existente que quer só ficar em dia (novas migrations e functions) — sem salto de versão maior:
+
+```bash
+git pull
+supabase db push          # aplica as migrations que faltam (ex.: 0054, 0055 voice gate)
+supabase functions deploy # redeploya as Edge Functions
+```
+
+Depois reconecte o MCP no seu harness se alguma tool nova/alterada não aparecer (o schema das tools só atualiza no reconnect). As seções abaixo cobrem apenas os saltos de versão maior, que têm passos extras.
+
 ## Upgrade para v3.0 (multi-provider)
 
 A **v3.0** introduz suporte a múltiplos provedores de WhatsApp — Z-API e Evolution API — selecionável por instância. Internamente, a tabela `zapi_instance` foi renomeada para `wa_instance` e `zapi_action_log` para `wa_action_log`; a Edge Function `zapi-proxy` virou `wa-proxy`. **Quem usa Z-API não precisa reconfigurar nada** — o upgrade é automático.

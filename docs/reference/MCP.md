@@ -1,6 +1,6 @@
 # Referência do MCP
 
-O servidor MCP é a Edge Function [`mcp-api`](../../supabase/functions/mcp-api/index.ts) — **não** é um processo local nem um MCP externo. Ele expõe ~20 tools que o Claude (ou qualquer harness com suporte a MCP) aciona em linguagem natural. **Fonte:** [`supabase/functions/mcp-api/index.ts`](../../supabase/functions/mcp-api/index.ts).
+O servidor MCP é a Edge Function [`mcp-api`](../../supabase/functions/mcp-api/index.ts) — **não** é um processo local nem um MCP externo. Ele expõe **27 tools** que o Claude (ou qualquer harness com suporte a MCP) aciona em linguagem natural. **Fonte:** [`supabase/functions/mcp-api/index.ts`](../../supabase/functions/mcp-api/index.ts).
 
 ---
 
@@ -31,6 +31,8 @@ O servidor MCP é a Edge Function [`mcp-api`](../../supabase/functions/mcp-api/i
 
 Categoria: **read** (consulta), **write** (altera metadados no banco), **destructive** (age no WhatsApp em seu nome). A coluna *confirma?* indica as tools que exigem `confirmed:true` numa segunda chamada — o Claude mostra destinatário+conteúdo e bloqueia até você confirmar.
 
+Além da confirmação, todo envio de texto passa pelo **voice gate** da instância (`wa_instance.voice_gate`, migration 0055): em `warn` (default) violações *hard* do voice guide voltam como `voice_warnings` sem barrar; em `block` uma violação `severity: high` **recusa o envio** (`send`, `send_voice`, `send_image`, `schedule`, `edit_message` e as actions de envio do `zapi_action`) a menos que a chamada traga `confirmed_voice:true` — flag que só deve ser usada com aprovação explícita do dono para o texto exato; `off` desliga o gate.
+
 | Tool | Categoria | Confirma? | O que faz |
 |---|---|:--:|---|
 | `status` | read | — | WhatsApp conectado? Stats por instância (via `wa-proxy`) |
@@ -39,15 +41,18 @@ Categoria: **read** (consulta), **write** (altera metadados no banco), **destruc
 | `search` | read | — | Busca texto nas mensagens; filtra por chat/categoria/período |
 | `list_categories` | read | — | Lista categorias válidas (use antes de `categorize_chat`) |
 | `download_attachment` | read | — | URL pública de uma mídia do Storage (por `message_id`) |
+| `check_delivery` | read | — | Status de entrega de uma mensagem enviada (`pending`/`sent`/`delivered`/`read`) por `message_id` |
 | `get_voice_guide` | read | — | Retorna o voice guide (markdown) do dono |
 | `check_message` | read | — | Verifica se um texto viola regras hard do voice guide (warning, não bloqueio) |
 | `setup_voice_guide` | read | — | Status do voice guide + regras hard ativas |
 | `categorize_chat` | write | — | Atribui categorias a um chat (idempotente) |
 | `uncategorize_chat` | write | — | Remove categorias de um chat |
 | `annotate_chat` | write | — | Salva observações/links sobre um contato |
+| `resolve_chat` | write | — | Marca uma conversa como resolvida (sai do "devendo resposta") ou adia com `snooze_until`; mensagem nova reabre sozinha |
 | `react` | write | — | Reage a uma mensagem com emoji (string vazia remove) |
 | `transcribe_audio` | write | — | Força transcrição de áudios pendentes (até 20) → `messages.content` |
 | `sync_groups` | write | — | Sincroniza nomes de grupos via provider (`dry_run` disponível) |
+| `merge_ghost_chats` | write | — | Funde chats duplicados do mesmo contato (`@lid` vs telefone) preservando o histórico |
 | `list_scheduled` | read | — | Lista sequências de mensagens agendadas (default: `pending`); traz id, horário BRT, progresso (`items_sent/total`) e erro |
 | `cancel_scheduled` | write | — | Cancela uma sequência agendada ainda `pending` (por id) |
 | `schedule` | destructive | ✅ | Agenda uma **sequência** de 1–10 mensagens (texto/mídia/voz TTS/enquete) pra envio único futuro. Confirmação na **criação**; o disparo (worker `dispatch-scheduled`, cron 1/min) roda sem novo gate |

@@ -116,6 +116,8 @@ Com uma conta [ElevenLabs](https://elevenlabs.io), *"manda um áudio pra Ana"* v
 
 Quando você pede *"responde o João pra mim"*, o agente redige **em seu nome** — e sem um guia do seu estilo, o texto sai correto mas com cara de assistente genérico. O **voice guide** (tabela `voice_guide`) é um documento com o seu jeito de escrever (abertura/fechamento típicos, registro, o que você nunca usaria, exemplos reais), consultado pelas tools `send`/`check_message` antes de redigir. A skill `/setup` monta o seu em ~10 minutos (você cola 3-5 mensagens suas + responde 6 perguntas) — ou instala um documento de estilo que você já tenha. Sem guide instalado, o agente avisa que está redigindo em estilo genérico.
 
+Além do aviso, existe o **voice gate** server-side por instância (`wa_instance.voice_gate`): em `warn` (default) violações das regras *hard* do seu guide voltam como aviso junto do envio; em `block` o servidor **recusa** qualquer envio com violação grave até você aprovar o texto exato (`confirmed_voice:true`) — vale para todas as superfícies, inclusive Claude Desktop/Web/celular. `off` desliga. Troque com um UPDATE simples em `wa_instance` (ver [SCHEMA.md](docs/reference/SCHEMA.md)).
+
 ### Como o agente decide "quem está devendo resposta"
 
 O `inbox` classifica cada conversa por `waiting_on` — quem falou por último define quem deve. As regras, já embutidas (você não precisa configurar nada):

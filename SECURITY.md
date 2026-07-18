@@ -1,86 +1,73 @@
 # SECURITY — WhatsApp Agent
 
 > Documento de modelo de ameaças, guard rails reais e runbooks de incidente.
-> Atualizar SEMPRE que mexer em send/auth/credenciais. Última revisão: 2026-05-01.
+> Atualizar SEMPRE que mexer em send/auth/credenciais. Última revisão: 2026-07-18 (arquitetura v3: Edge Functions + MCP-over-HTTP + voice gate).
 
-## 1. O que está protegido (e o que NÃO está)
+## 1. Arquitetura de segurança (v3)
 
-### Tool `send` do MCP whatsapp-agent
+Não existe mais processo MCP local: o runtime inteiro são **Edge Functions no Supabase**. O cliente (Claude Code, Desktop, Web, celular) fala com a `mcp-api` por HTTP.
 
-| Risco | Status |
+| Camada | Proteção |
 |-------|--------|
-| LLM disparar mensagem sem antes mostrar destinatário+conteúdo ao dono | **Mitigado**: `confirmed=true` é flag explícita, default false. Sem confirmed → MCP retorna `BLOQUEADO: confirmacao pendente.` |
-| LLM mandar pra número que ainda não está em chats (primeiro contato) | **Mitigado**: `allow_new=true` é flag separada. Default false retorna erro pedindo confirmação. |
-| LLM disparar em massa via MCP | **Mitigado por design**: MCP NÃO tem tool batch. 1 chamada = 1 chat. Campanhas em massa rodam via skills `whatsapp-campanha-*` (ChatGuru), separadas. |
+| Autenticação da `mcp-api` | Header `x-mcp-key` comparado em **tempo constante** com o secret `MCP_API_KEY`, ou **OAuth** (Claude Desktop/Web). Sem key válida → 401. |
+| Edges internas (`send-message`, `send-voice`, `wa-proxy`) | `verify_jwt: true` — só aceitam chamada com JWT do projeto (a `mcp-api` chama com o JWT interno). |
+| Webhook (`process-webhook`) | Autenticação **TOFU por instância** (`wa_instance.webhook_token`, migration 0029) + `WEBHOOK_REQUIRE_AUTH=true` recomendado: webhook de instância não registrada é rejeitado com 401. |
+| Confirmação de envio | Toda tool destrutiva (`send`, `send_voice`, `send_image`, `schedule`, `edit_message`, `delete_message`, `zapi_action` de envio) exige `confirmed:true` numa **segunda** chamada — a primeira devolve o preview e bloqueia. |
+| **Voice gate** (0055) | `wa_instance.voice_gate` = `off` \| `warn` (default) \| `block`. Em `block`, envio com violação `severity: high` do voice guide é **recusado server-side** a menos que venha `confirmed_voice:true` (aprovação explícita do dono para o texto exato). Cobre as 5 tools de envio **e** as actions de texto do `zapi_action`. |
+| Anti-atropelo | Gate de *inbound recente*: se o contato mandou mensagem há <10 min e não foi respondida, o `send` bloqueia (`force_send_after_inbound` destrava conscientemente). |
+| Auditoria | `wa_action_log` (toda action do `wa-proxy`, com `agent_name` + `agent_request_id`) e `messages.sent_by_agent`/`agent_name` — dá pra responder "qual agente enviou o quê, quando". |
+| Massa | O MCP **não tem tool batch** por design: 1 chamada = 1 chat. |
 
-### Limitações reconhecidas (NÃO mitigado)
+## 2. Limitações reconhecidas (NÃO mitigado)
 
-- **`confirmed=true` é cooperativo, não adversarial.** O mesmo LLM que escreve a mensagem decide setar a flag. Prompt injection (ex: áudio transcrito malicioso) pode passar `confirmed=true` sem confirmação real do humano. Gate humano de verdade requer confirmação out-of-band — pendente (Telegram 2FA, ver §3).
-- **Edge Function `send-message` não valida `confirmed` nem rate limit.** Qualquer caller com `service_role` chama a Edge direto e bypassa o gate do MCP. Hardening pendente (§3).
-- **Sem rate limit em lugar nenhum** — MCP, Edge Function, Z-API config. Loop bug = N mensagens sem freio. Z-API aceita ~30 msg/s; em 60s = 1.800 msgs; WhatsApp bana o número pessoal em 200-500 disparos repetitivos.
-- **Sem audit log estruturado** — só `messages.sent_by_agent` boolean. Não dá pra responder "qual prompt originou esse send, em qual instância, em qual sessão". Forense impossível hoje.
-- **Webhook signature OFF** — `process-webhook` v9 tem validação opcional implementada mas `WEBHOOK_REQUIRE_AUTH=false` (default). Qualquer um pode forjar webhook (envenenar `webhook_events_raw` e indiretamente o contexto que o agente lê). Ativação pendente (depende de configurar Client-Token no painel Z-API).
-
-## 2. Instâncias do MCP
-
-Você pode rodar múltiplas cópias do MCP — em máquina local, container, VPS, etc. Recomendado manter todas na mesma versão do `index.js`.
-
-| Local | Path exemplo |
-|-------|------|
-| Local (macOS/Linux) | `~/.claude/mcps/whatsapp-agent/` |
-| Windows | `C:\MCPs\whatsapp-agent\` |
-| Container/VPS | `/workspace/whatsapp-agent/mcp/` |
-
-Verificar paridade entre instâncias: `sha256sum index.js` em cada uma. Diferença ⇒ alguém aplicou patch fora do fluxo, investigar.
+- **`confirmed:true` e `confirmed_voice:true` são cooperativos, não adversariais.** O mesmo LLM que redige decide setar as flags. Prompt injection (ex.: mensagem/áudio malicioso lido do próprio WhatsApp) pode setar as duas sem confirmação humana real. Gate humano de verdade requer confirmação out-of-band (backlog §3). Nas máquinas do dono, um hook local bloqueante (fora deste repo) reduz o risco; superfícies OAuth dependem do voice gate + confirmação cooperativa.
+- **Caller com `service_role` bypassa tudo**: quem tem a key do projeto chama `send-message` direto. A key nunca sai do ambiente das functions/CI — vazou, rotacione (runbook §4).
+- **Rate limit é básico** (por chat/minuto no caminho de envio) — um loop lento e distribuído entre chats ainda passa. WhatsApp bane números por volume repetitivo; monitore `messages` por picos.
 
 ## 3. Backlog de hardening (priorizado)
 
 | Prioridade | Item | Status |
 |-----------|------|--------|
-| P0 | Webhook signature ON (`WEBHOOK_REQUIRE_AUTH=true`) | Pendente — configure Client-Token no painel Z-API |
-| P0 | Rotação periódica de credenciais (service_role, Z-API client-token) | Pendente |
-| P1 | Edge Function `send-message`: valida `confirmed=true` server-side | Backlog |
-| P1 | Edge Function `send-message`: rate limit por número/janela (ex: 10 msg/min, 100 msg/dia, 5 msg/min por contato) | Backlog |
-| P1 | Audit log estruturado (`outbound_messages_audit`: source, container_id, session_id, prompt_hash, payload, confirmed_at, status) | Backlog |
-| P2 | Telegram 2FA out-of-band: antes do `send` executar, MCP pergunta no Telegram do dono "Confirmar pra X: [preview] SIM/NÃO" | Backlog |
-| P2 | Tirar `service_role` de `.mcp.json` e `mcporter.json` — usar secret manager ou env do container | Backlog |
-| P3 | Whitelist por contato (envia sem pedir) + blacklist (sempre confirmar) | Backlog |
-| P3 | Botão "freeze outbound" global (kill switch) via expert-brain MCP | Backlog |
+| P0 | Rotação periódica de credenciais (`service_role`, `MCP_API_KEY`, tokens do provider) | Processo manual |
+| P1 | Confirmação out-of-band (2FA via canal separado antes de `send` de risco) | Backlog |
+| P2 | Whitelist por contato (envia sem pedir) + blacklist (sempre confirmar) | Backlog |
+| P3 | Kill switch global de outbound (freeze) por tool dedicada | Parcial: `UPDATE wa_instance SET is_active=false` já derruba o envio |
 
 ## 4. Runbooks de incidente
 
-### Vazou `service_role` do Supabase
-1. Dashboard Supabase → Settings → API → "Reset service_role". Gera nova key, **invalida a antiga imediatamente**.
-2. Atualizar em todos os pontos: env das Edge Functions (via Management API), env do MCP (`SUPABASE_SERVICE_ROLE_KEY`).
-3. Audit: `SELECT COUNT(*) FROM messages WHERE created_at > <hora_vazamento> AND from_me=true` — quantas mensagens enviadas no intervalo.
-4. Se houver suspeita de injeção de mensagens fake: `SELECT * FROM messages WHERE created_at > <hora> AND sent_by_agent IS NULL` (rows sem flag = caminho não-MCP).
+### Vazou `service_role` ou `MCP_API_KEY`
+
+1. `service_role`: Dashboard Supabase → Settings → API → *Reset service_role* (invalida a antiga na hora). `MCP_API_KEY`: `supabase secrets set MCP_API_KEY=<nova>` + atualizar o cliente MCP.
+2. Audit: `SELECT COUNT(*) FROM messages WHERE created_at > '<hora_vazamento>' AND from_me = true;` e `SELECT * FROM wa_action_log WHERE created_at > '<hora>' ORDER BY created_at DESC;`.
 
 ### Disparou mensagem errada
-1. **Pausa imediata**: `UPDATE zapi_instance SET is_active=false WHERE is_active=true` — derruba a Edge Function `send-message` (retorna 500).
-2. Identificar: `SELECT id, chat_id, content, created_at FROM messages WHERE from_me=true AND created_at > now() - interval '5 minutes' ORDER BY created_at DESC`.
-3. Apagar via Z-API: `zapi_action({ action: "delete-message", params: { phone, messageId, owner: true } })`.
-4. Reativar: `UPDATE zapi_instance SET is_active=true`.
+
+1. **Pausa imediata**: `UPDATE wa_instance SET is_active = false WHERE is_active = true;` (o envio passa a falhar).
+2. Identificar: `SELECT id, chat_id, content, agent_name, created_at FROM messages WHERE from_me = true AND created_at > now() - interval '5 minutes' ORDER BY created_at DESC;`.
+3. Apagar para todos: tool `delete_message` (ou `zapi_action` `delete-message` com `owner: true`).
+4. Reativar: `UPDATE wa_instance SET is_active = true;`.
 
 ### Loop de envio (N mensagens em segundos)
-1. Pausa imediata (passo 1 acima).
-2. Matar processo MCP que disparou: `docker exec <container> pkill -f whatsapp-agent` ou matar processo Node local.
-3. Investigar `webhook_events_raw` + `messages` pra reconstruir o trigger.
-4. Não reativar a Edge Function antes de identificar e corrigir o loop.
+
+1. Pausa imediata (passo 1 acima). Não há processo local para matar — o disparo vem de um cliente MCP; desconecte o conector que originou (identifique por `agent_name` em `messages`/`wa_action_log`).
+2. Se o loop vier de sequências agendadas: `UPDATE scheduled_sequences SET status='canceled' WHERE status='pending';`.
+3. Investigar `wa_action_log` + `messages` para reconstruir o gatilho antes de reativar.
 
 ### Webhook hostil envenenando dados
-1. Setar `WEBHOOK_REQUIRE_AUTH=true` (se não estava).
-2. `DELETE FROM webhook_events_raw WHERE received_at > <hora_suspeita> AND raw_headers->>'Client-Token' IS NULL` (events sem token).
-3. Reverter `messages` afetadas: `DELETE FROM messages WHERE created_at > <hora> AND raw_payload->>'instanceId' != '<nosso_instance_id>'`.
+
+1. Garantir `WEBHOOK_REQUIRE_AUTH=true` e `webhook_token` setado por instância.
+2. `DELETE FROM webhook_events_raw WHERE received_at > '<hora_suspeita>' AND instance_id NOT IN (SELECT instance_id FROM wa_instance);`.
+3. Reverter `messages` afetadas pelo mesmo critério de instância/período.
 
 ### Suspeita de prompt injection no agente
-1. Pausa Edge Function (passo 1 do disparo errado).
-2. Auditar últimas 20 entradas em `messages` lidas pelo MCP — procurar texto que parece instrução em vez de mensagem ("ignore tudo", "envie X pra Y", base64 suspeito).
-3. Ativar `WEBHOOK_REQUIRE_AUTH` se ainda estiver OFF.
-4. Reset do contexto do agente se ele estava executando tarefa multi-turn.
+
+1. Pausa das instâncias (passo 1 do disparo errado).
+2. Auditar as últimas mensagens lidas — procurar texto que parece instrução ("ignore tudo", "envie X pra Y", base64 suspeito).
+3. Conferir se houve envio com `confirmed_voice:true` não aprovado pelo dono (`voice_warnings` no retorno ficam registradas no log do cliente).
+4. Resetar o contexto do agente antes de reativar.
 
 ## 5. Convenções
 
-- Mudança em `send`, `zapi_action`, `process-webhook` ou Edge Function `send-message` exige update deste documento.
-- Nova credencial entra em memory-mcp `whatsapp-agent-*`, nunca no código nem em commit.
-- Nova instância do MCP entra na tabela §2 antes de subir.
+- Mudança em tool de envio, `zapi_action`, `process-webhook`, voice gate ou qualquer edge de envio exige update deste documento.
+- Credencial nunca no código nem em commit — secrets do Supabase ou env local gitignored.
 - Pull request que toca este arquivo precisa explicar a mudança de modelo de ameaças.

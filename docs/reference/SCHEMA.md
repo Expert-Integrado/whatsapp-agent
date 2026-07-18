@@ -89,6 +89,7 @@ Uma linha por número de WhatsApp conectado. É a tabela que decide **qual prove
 | `default_voice_id` | TEXT | Voz TTS default do `send-voice` quando o request não especifica (0046) |
 | `humanize_enabled` | BOOLEAN | Escolha do onboarding: `false` desliga a humanização oral do `send-voice` na instância, sobrepondo o nível do perfil (0052) |
 | `voice_guide_skipped_at` | TIMESTAMPTZ | Pulo consciente do voice guide no onboarding; NULL = nunca ofertado ou guide instalado (0053) |
+| `voice_gate` | TEXT | Gate de voz server-side no `mcp-api`: `off`, `warn` (default) ou `block` — em `block`, envio com violação `high` do voice guide é recusado sem `confirmed_voice:true` (CHECK `wa_instance_voice_gate_check`) (0055) |
 | `is_active`, `last_connected_at`, `last_disconnected_at` | — | Estado da conexão |
 | `created_at`, `updated_at` | TIMESTAMPTZ | Trigger `set_updated_at` em `updated_at` |
 
@@ -314,6 +315,8 @@ Todos rodam em **UTC**. Os que chamam Edge Functions usam `call_edge_function` +
 | 0051 | `voice_profiles` | Tabela `voice_profiles`: catálogo de perfis de voz TTS — `send-voice` resolve `profile` e trava voice/settings server-side; `humanize` = nível de oralização |
 | 0052 | `instance_humanize_toggle` | `wa_instance.humanize_enabled` (escolha do onboarding): `false` força texto literal no `send-voice`, sobrepondo o nível do perfil |
 | 0053 | `voice_guide_skip_tracking` | `wa_instance.voice_guide_skipped_at`: registro do pulo consciente do voice guide no onboarding (distingue de "nunca ofertado") |
+| 0054 | `lid_contact_name_fallback` | Fallback de nome de contato para chats `@lid` sem nome resolvido |
+| 0055 | `instance_voice_gate` | `wa_instance.voice_gate` (`off`/`warn`/`block`, default `warn`): gate de voz server-side no `mcp-api` — última linha de defesa para superfícies sem hook local |
 
 ---
 

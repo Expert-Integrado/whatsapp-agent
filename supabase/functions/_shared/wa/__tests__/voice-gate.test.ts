@@ -1,10 +1,11 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import { evaluateVoiceGate, type VoiceViolation } from "../voice-gate.ts";
 
-// checker fake: "zapx" = high, "blzx" = medium
+// checker fake: "zapx" e "morx" = high, "blzx" = medium
 const violationsFor = (text: string): VoiceViolation[] => {
   const out: VoiceViolation[] = [];
   if (/zapx/i.test(text)) out.push({ id: "zap", severity: "high", message: "regra zap", match: "zapx" });
+  if (/morx/i.test(text)) out.push({ id: "vocativo", severity: "high", message: "regra vocativo", match: "morx" });
   if (/blzx/i.test(text)) out.push({ id: "blz", severity: "medium", message: "regra blz", match: "blzx" });
   return out;
 };
@@ -45,6 +46,12 @@ Deno.test("texto limpo: passa em qualquer gate", () => {
     assertEquals(r.blocked, false);
     assertEquals(r.violations.length, 0);
   }
+});
+
+Deno.test("acumulacao: 2 violacoes high DISTINTAS na mesma chamada bloqueiam com as 2 listadas", () => {
+  const r = evaluateVoiceGate({ texts: ["zapx e morx na mesma msg"], gate: "block", confirmedVoice: false, violationsFor });
+  assertEquals(r.blocked, true);
+  assertEquals(r.violations.map((v) => v.id).sort(), ["vocativo", "zap"]);
 });
 
 Deno.test("dedupe: mesma regra em 2 textos aparece 1x", () => {

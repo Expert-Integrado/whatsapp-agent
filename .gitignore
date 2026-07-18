@@ -18,3 +18,11 @@ Ctmp*
 
 # Teste de integracao com os casos PESSOAIS do dono (carrega o checks.json real) — nunca versionar
 mcp/test-checks-local.js
+
+# Testes legados do stdio v1 com fixtures REAIS de producao (nomes/telefones) — nunca versionar
+mcp/test-categories.js
+mcp/test-fase2.js
+mcp/test-inbox.js
+mcp/test-resolve.js
+mcp/package.json
+mcp/package-lock.json

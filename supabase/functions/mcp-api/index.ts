@@ -1401,6 +1401,19 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         }
         if (ZAPI_SEND_ACTIONS.has(zaction) && !confirmed) return json({ blocked: true, needs_confirmation: true, action: zaction, params: zparams, instruction: `A action "${zaction}" envia conteudo. Mostre ao usuario e reenvie com confirmed:true apos confirmacao.` });
         delete zparams._target_message;
+        // Voice gate tambem no passthrough (auditoria 18/07): send-text/send-message/
+        // edit-message/send-poll carregam texto livre — sem isto o zapi_action seria
+        // bypass do gate das 5 tools oficiais. Sem `instance` explicita o wa-proxy
+        // usa a default, entao o gate resolve pela default tambem (nunca fica sem gate).
+        if (ZAPI_SEND_ACTIONS.has(zaction)) {
+          const instRows = await loadInstances();
+          const gateInstance = (instance ? await resolveInstanceKey(instance) : null)
+            ?? instRows.find((r: any) => r.is_default)?.instance_id ?? instRows[0]?.instance_id ?? null;
+          const ztexts = [zparams.message, zparams.body, zparams.text, zparams.caption,
+            ...(Array.isArray((zparams as any).options) ? (zparams as any).options : [])];
+          const vgz = await runVoiceGate(ztexts, gateInstance, params);
+          if (vgz.block) return vgz.block;
+        }
         const { status, data } = await callEdge("wa-proxy", { action: zaction, params: zparams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}`, detail: data }, status);
         return json({ ok: true, action: zaction, result: data?.result });
@@ -1885,6 +1898,7 @@ const TOOL_SCHEMAS = [
         action: { type: "string", description: "Nome do endpoint Z-API (ex: read-chat, send-poll, create-group)" },
         params: { type: "object", description: "Parametros da action", additionalProperties: true },
         confirmed: { type: "boolean", description: "Obrigatorio true para actions de envio" },
+        confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o texto exato apos ver as violacoes — nunca por iniciativa propria" },
         instance: { type: "string", description: "De qual numero (alias ou instance_id)" },
       },
       required: ["action", "params"],
