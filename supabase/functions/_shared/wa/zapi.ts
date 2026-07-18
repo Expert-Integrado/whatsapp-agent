@@ -38,6 +38,17 @@ const DL_TIMEOUT_MS: Record<string, number> = {
   "whatsapp-stickers":  10000,
 };
 
+// A extensao no path /send-document/{ext} define como o WhatsApp rotula o
+// documento no aparelho — hardcoded "pdf" fazia .vcf/.xlsx chegarem como "PDF".
+// Deriva do fileName; sem extensao valida ([a-z0-9]{1,8}), cai no pdf.
+function docExt(fileName?: string): string {
+  const name = String(fileName ?? "");
+  const i = name.lastIndexOf(".");
+  if (i <= 0 || i === name.length - 1) return "pdf";
+  const ext = name.slice(i + 1).toLowerCase();
+  return /^[a-z0-9]{1,8}$/.test(ext) ? ext : "pdf";
+}
+
 /**
  * GET with retry — ported from process-webhook/index.ts:456-475.
  * Tries `attempts` times with 500ms delay between failures.
@@ -243,7 +254,7 @@ export class ZapiProvider implements WaProvider {
         break;
       case "document": {
         const fileName = msg.media?.fileName ?? msg.content ?? "document.pdf";
-        endpoint = `${base}/send-document/pdf`;
+        endpoint = `${base}/send-document/${docExt(fileName)}`;
         zapiBody = {
           phone,
           document: mediaUrl,
@@ -444,12 +455,12 @@ export class ZapiProvider implements WaProvider {
       return { url: `${base}/${action}${qs.toString() ? `?${qs.toString()}` : ""}`, method: "GET", headers };
     }
 
-    // send-document usa path /send-document/pdf na Z-API (mesmo port de buildSend
+    // send-document deriva a extensao do path do fileName (mesmo docExt de buildSend
     // case "document" acima) — só chega aqui via edit_message (editDocumentMessageId),
     // nunca no envio normal (que passa por buildSend).
     if (action === "send-document") {
       return {
-        url: `${base}/send-document/pdf`,
+        url: `${base}/send-document/${docExt((params as any)?.fileName)}`,
         method: "POST",
         headers,
         body: JSON.stringify(params),

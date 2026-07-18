@@ -397,6 +397,62 @@ Deno.test("zapi.buildAction send-document com editDocumentMessageId → POST /se
   assertEquals(body.editDocumentMessageId, "MSGID789");
 });
 
+Deno.test("zapi.buildAction send-document com fileName deriva a extensao do path", () => {
+  const r = z.buildAction(creds, "send-document", { phone: "5511", fileName: "contatos.vcf", editDocumentMessageId: "MSGID790" });
+  assertEquals(r!.url.endsWith("/send-document/vcf"), true);
+});
+
+// A extensao do path da Z-API define como o WhatsApp rotula o documento —
+// hardcoded /pdf fazia .vcf/.xlsx chegarem como "PDF" no aparelho (bug 18/07).
+Deno.test("zapi.buildSend document deriva extensao do fileName (.vcf)", async () => {
+  const r = await z.buildSend(creds, {
+    chatId: "5511", phone: "5511", type: "document",
+    media: { url: "https://x/contatos.vcf", fileName: "contatos.vcf" },
+  });
+  assertEquals(r.url.endsWith("/send-document/vcf"), true);
+  assertEquals(JSON.parse(r.body!).fileName, "contatos.vcf");
+});
+
+Deno.test("zapi.buildSend document normaliza extensao maiuscula (.XLSX -> xlsx)", async () => {
+  const r = await z.buildSend(creds, {
+    chatId: "5511", phone: "5511", type: "document",
+    media: { url: "https://x/planilha.XLSX", fileName: "planilha.XLSX" },
+  });
+  assertEquals(r.url.endsWith("/send-document/xlsx"), true);
+});
+
+Deno.test("zapi.buildSend document sem fileName cai no default pdf", async () => {
+  const r = await z.buildSend(creds, {
+    chatId: "5511", phone: "5511", type: "document",
+    media: { url: "https://x/arquivo" },
+  });
+  assertEquals(r.url.endsWith("/send-document/pdf"), true);
+});
+
+Deno.test("zapi.buildSend document fileName sem extensao cai no pdf", async () => {
+  const r = await z.buildSend(creds, {
+    chatId: "5511", phone: "5511", type: "document",
+    media: { url: "https://x/leiame", fileName: "README" },
+  });
+  assertEquals(r.url.endsWith("/send-document/pdf"), true);
+});
+
+Deno.test("zapi.buildSend document extensao com char invalido cai no pdf", async () => {
+  const r = await z.buildSend(creds, {
+    chatId: "5511", phone: "5511", type: "document",
+    media: { url: "https://x/f", fileName: "arquivo.v?f" },
+  });
+  assertEquals(r.url.endsWith("/send-document/pdf"), true);
+});
+
+Deno.test("zapi.buildSend document nome composto usa a ULTIMA extensao (.tar.gz -> gz)", async () => {
+  const r = await z.buildSend(creds, {
+    chatId: "5511", phone: "5511", type: "document",
+    media: { url: "https://x/backup.tar.gz", fileName: "backup.tar.gz" },
+  });
+  assertEquals(r.url.endsWith("/send-document/gz"), true);
+});
+
 
 Deno.test("zapi.parseConnection lê connected/smartphoneConnected", () => {
   assertEquals(z.parseConnection({ connected: true }).connected, true);
