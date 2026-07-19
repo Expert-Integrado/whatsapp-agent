@@ -51,37 +51,25 @@ export async function brainToolCall(pat: string, name: string, args: Json): Prom
   return result as Json;
 }
 
-// Cria o card de aprovacao. O card NAO precisa ser privado: o segredo que
-// aprova nao e o link, e o PIN do dono (agente pode ate ver o link — sem PIN
-// nao aprova). Retorna o id da task ou null (nunca lanca — a retencao vale
-// mesmo sem card; o approval_id fica no retorno).
-export async function brainSaveApprovalTask(pat: string, input: {
-  title: string; details: string; dueBrt?: string;
+// Cria uma task no board do dono (feedback de calibracao do voice guide, 0058).
+// dedupe_key impede spam: mesmo problema no mesmo dia = 1 card so. Best-effort:
+// retorna o id ou null, nunca lanca — falha no Brain jamais afeta o envio.
+export async function brainSaveTask(pat: string, input: {
+  title: string; details: string; dedupeKey?: string; tags?: string[]; priority?: number;
 }): Promise<string | null> {
   try {
     const r = await brainToolCall(pat, "save_task", {
       title: input.title,
       details: input.details,
-      priority: 1,
+      priority: input.priority ?? 2,
       project: "WhatsApp Agent",
       domains: ["operations"],
-      tags: ["aprovacao-voz"],
-      ...(input.dueBrt ? { due: input.dueBrt } : {}),
+      tags: input.tags ?? [],
+      ...(input.dedupeKey ? { dedupe_key: input.dedupeKey } : {}),
     });
     return (r as any).id ?? null;
   } catch (e) {
     console.error("[brain-client] save_task falhou:", (e as Error).message);
     return null;
-  }
-}
-
-// Fecha o card apos aprovar/recusar/expirar. Best-effort (nunca lanca).
-export async function brainCompleteApprovalTask(pat: string, taskId: string, outcome: string): Promise<boolean> {
-  try {
-    await brainToolCall(pat, "complete_task", { id: taskId, outcome });
-    return true;
-  } catch (e) {
-    console.error("[brain-client] complete_task falhou:", (e as Error).message);
-    return false;
   }
 }

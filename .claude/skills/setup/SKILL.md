@@ -311,14 +311,15 @@ Na sequência do voice guide, pergunte (AskUserQuestion):
 
 > "Quando eu redigir algo em seu nome que viole uma regra grave do seu estilo, o que o servidor deve fazer?"
 > - **Avisar e enviar (recomendado pra começar):** o envio sai e volta com o aviso da violação junto (`warn` — é o padrão).
-> - **Bloquear até corrigir:** o servidor RECUSA o envio; o agente corrige o texto e reenvia sozinho (`block` — recomendado pra quem instalou o guide e deixa o agente responder sozinho). Pontualmente, se o texto precisar sair exatamente como está, o agente pode reter pra sua aprovação por clique + PIN (`request_approval`).
-> - **Reter pra aprovação por clique + PIN:** a mensagem fica RETIDA no servidor e só sai quando você clicar em Aprovar e digitar seu PIN numa página — nem o agente consegue liberar (`approval`, migration 0057; o mais seguro, exige o Expert Brain conectado pro card de aprovação e o secret `EXPERT_BRAIN_PAT`).
+> - **Bloquear até corrigir:** o servidor RECUSA o envio; o agente corrige o texto e reenvia sozinho até passar (`block` — recomendado pra quem instalou o guide e deixa o agente responder sozinho). Não existe aprovação de mensagem: a única exceção é `confirmed_voice:true`, quando VOCÊ aprovou o texto exato (fica auditado).
 > - **Desligar:** nenhuma checagem no servidor (`off`).
+
+Se o dono usa o Expert Brain (secret `EXPERT_BRAIN_PAT` configurado), o `block` ganha um extra automático: quando o agente patina (3+ recusas no mesmo chat em 15 min), nasce UMA task de correção no board dele com as regras que estão barrando — ele usa a task pra calibrar o voice guide/checks e o agente melhora em definitivo. Sem Brain, o agente simplesmente corrige até dar certo.
 
 Aplique a escolha (só é preciso rodar se NÃO for `warn`, que é o default da migration 0055):
 
 ```bash
-SQL="UPDATE wa_instance SET voice_gate = '<off|warn|block|approval>' WHERE instance_id = '<INSTANCE_ID>';"
+SQL="UPDATE wa_instance SET voice_gate = '<off|warn|block>' WHERE instance_id = '<INSTANCE_ID>';"
 curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
   -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
   -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"

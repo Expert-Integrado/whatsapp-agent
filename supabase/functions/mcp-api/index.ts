@@ -13,16 +13,17 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { normalizePhoneBR, expandChatIdCandidates, pickPhoneChat } from "../_shared/wa/phone.ts";
 import { evaluateVoiceGate, type VoiceGateMode, type VoiceViolation } from "../_shared/wa/voice-gate.ts";
 import { ZAPI_SEND_ACTIONS, zapiGateTexts, scheduleGateTexts, defaultGateInstance } from "../_shared/wa/gate-inputs.ts";
-import { approvalCardMarkdown, approvalDecision, hashToken, newApprovalToken, type ApprovalAction } from "../_shared/wa/approval.ts";
-import { brainCompleteApprovalTask, brainSaveApprovalTask } from "../_shared/wa/brain-client.ts";
+import { feedbackDedupeKey, shouldOpenFeedbackTask, voiceFeedbackMarkdown } from "../_shared/wa/voice-feedback.ts";
+import { brainSaveTask } from "../_shared/wa/brain-client.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 const MCP_API_KEY = Deno.env.get("MCP_API_KEY") ?? "";
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
-// PAT do Expert Brain (aprovacao out-of-band, 0057): cria o card PRIVADO de
-// aprovacao e fecha ele apos o clique do dono. Sem o secret, a retencao continua
-// valendo (linha no banco + approval_id no retorno) — so o card nao nasce.
+// PAT do Expert Brain (feedback de calibracao, 0058): quando o agente patina no
+// voice gate (bloqueios repetidos no mesmo chat), abre task de CORRECAO do voice
+// guide no board do dono. Opcional — dono sem Brain nao seta o secret e o agente
+// simplesmente segue corrigindo o texto ate passar.
 const EXPERT_BRAIN_PAT = Deno.env.get("EXPERT_BRAIN_PAT") ?? "";
 
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -649,7 +650,7 @@ async function loadVoiceGuide(instanceId?: string | null): Promise<any | null> {
 // dono). Decisao pura em _shared/wa/voice-gate.ts (testada). loadInstances tem
 // cache por isolate — mudanca de modo pega em minutos, nao precisa redeploy.
 async function runVoiceGate(texts: (string | null | undefined)[], instanceId: string | null | undefined, params: any, tool = "send"):
-  Promise<{ block?: Response; warnings?: VoiceViolation[]; retain?: VoiceViolation[] }> {
+  Promise<{ block?: Response; warnings?: VoiceViolation[] }> {
   if (!texts.some((t) => typeof t === "string" && t.trim())) return {};
   const rows = await loadInstances();
   const gate = (rows.find((r: any) => r.instance_id === instanceId)?.voice_gate ?? "warn") as VoiceGateMode;
@@ -657,15 +658,16 @@ async function runVoiceGate(texts: (string | null | undefined)[], instanceId: st
   const g = await loadVoiceGuide(instanceId ?? null);
   const customRules = compileCustomRules(g?.checks);
   const r = evaluateVoiceGate({ texts, gate, confirmedVoice: params?.confirmed_voice === true,
-    requestApproval: params?.request_approval === true,
     violationsFor: (t) => checkVoiceViolations(t, customRules) });
   if (r.blocked) {
+    // Log do bloqueio + eventual task de correcao do voice guide (0058) — o
+    // feedback nunca impede a recusa nem muda o contrato: corrigir e reenviar.
+    await logBlockAndMaybeOpenFeedback({ instanceId: instanceId ?? null, chatRef: chatRefFrom(params), tool,
+      ruleIds: r.violations.map((v) => v.id),
+      preview: texts.filter((t): t is string => typeof t === "string" && t.trim().length > 0).join(" | ").slice(0, 500) });
     return { block: json({ ok: false, blocked: true, reason: "voice_gate", violations: r.violations,
-      instruction: "Envio recusado (voice_gate=block): o texto viola regra HARD do voice guide da instancia. CORRIJA o texto (remova a violacao mantendo o sentido) e reenvie — este e o caminho padrao. Se o dono ja aprovou o texto exatamente como esta, reenvie com confirmed_voice:true; se o texto PRECISA sair como esta e o dono vai decidir depois pelo board, reenvie com request_approval:true (retem e cria card de aprovacao)." }) };
+      instruction: "Envio recusado (voice_gate=block): o texto viola regra HARD do voice guide da instancia. CORRIJA o texto (remova a violacao mantendo o sentido) e reenvie ate passar — este e o caminho. Excecao unica: se o dono aprovou explicitamente o texto exato no chat, reenvie com confirmed_voice:true (fica auditado)." }) };
   }
-  // Modo approval (0057): o case chama retainForApproval com o payload de replay —
-  // aqui so a decisao (confirmed_voice NAO bypassa nesse modo, por design).
-  if (r.retain) return { retain: r.violations };
   if (r.bypassed) {
     // Trilha SILENCIOSA (0056): confirmed_voice soltou violacao high em gate block.
     // Falha no log nunca derruba o envio ja aprovado pelo dono.
@@ -677,188 +679,47 @@ async function runVoiceGate(texts: (string | null | undefined)[], instanceId: st
   return r.violations.length ? { warnings: r.violations } : {};
 }
 
-// ─── Aprovacao out-of-band (0057) ──────────────────────────────────────────────
-// Envio com violacao high em gate 'approval' NAO sai e NAO aceita confirmed_voice:
-// vira linha em voice_pending_approval + card PRIVADO no Brain com links Aprovar/
-// Recusar. O clique do dono (browser, board) bate no GET publico ?approval= com o
-// token secreto; so entao o payload retido e re-executado. O agente nunca ve o
-// token (banco guarda SHA-256; o link mora no card privado).
-const APPROVAL_TTL_MS = 24 * 3600_000;
+// ─── Feedback de dificuldade do voice gate (0058) ──────────────────────────────
+// Contrato do modo block (modelo FIXO do produto, decisao do dono 19/07): o
+// agente CORRIGE o texto e reenvia ate passar — nao existe aprovacao de mensagem.
+// Cada bloqueio vira linha em voice_block_log; quando o mesmo chat acumula o
+// threshold em 15min e o dono usa o Expert Brain (EXPERT_BRAIN_PAT), nasce UMA
+// task de CORRECAO do voice guide (dedupe por instancia+chat+dia) — insumo de
+// calibracao do agente, nunca botao de liberar envio. Sem PAT, so o log.
+const FEEDBACK_WINDOW_MIN = 15;
 
-async function retainForApproval(input: {
-  tool: string; instanceId: string | null | undefined;
-  chatId?: string | null; chatName?: string | null;
-  texts: (string | null | undefined)[]; violations: VoiceViolation[]; payload: any;
-}): Promise<Response> {
-  const token = newApprovalToken();
-  const expiresAt = new Date(Date.now() + APPROVAL_TTL_MS).toISOString();
-  const { data: row, error } = await supabase.from("voice_pending_approval").insert({
-    expires_at: expiresAt, instance_id: input.instanceId ?? null, chat_id: input.chatId ?? null,
-    chat_name: input.chatName ?? null, tool: input.tool, payload: input.payload,
-    violations: input.violations, token_hash: await hashToken(token),
-  }).select("id").single();
-  if (error) return json({ ok: false, error: `Retencao pra aprovacao falhou: ${error.message}` }, 500);
-  const base = `${SUPABASE_URL}/functions/v1/mcp-api`;
-  const approveUrl = `${base}?approval=${row.id}.${token}&action=approve`;
-  const rejectUrl = `${base}?approval=${row.id}.${token}&action=reject`;
-  let brainTaskId: string | null = null;
-  if (EXPERT_BRAIN_PAT) {
+function chatRefFrom(params: any): string {
+  return String(params?.to ?? params?.chat ?? params?.params?.phone ?? "-").slice(0, 60);
+}
+
+async function logBlockAndMaybeOpenFeedback(input: {
+  instanceId: string | null; chatRef: string; tool: string; ruleIds: string[]; preview: string;
+}): Promise<void> {
+  try {
+    const { error } = await supabase.from("voice_block_log").insert({
+      instance_id: input.instanceId, chat_ref: input.chatRef, tool: input.tool,
+      rule_ids: input.ruleIds, text_preview: input.preview });
+    if (error) { console.error("[voice-feedback] log falhou:", error.message); return; }
+    if (!EXPERT_BRAIN_PAT) return;
+    const since = new Date(Date.now() - FEEDBACK_WINDOW_MIN * 60000).toISOString();
+    const { data: recent } = await supabase.from("voice_block_log")
+      .select("tool,rule_ids,text_preview")
+      .eq("chat_ref", input.chatRef).gte("created_at", since)
+      .order("created_at", { ascending: true }).limit(50);
+    if (!recent || !shouldOpenFeedbackTask(recent.length)) return;
     const rows = await loadInstances();
     const alias = rows.find((r: any) => r.instance_id === input.instanceId)?.alias ?? input.instanceId ?? "default";
-    const md = approvalCardMarkdown({
-      chatName: input.chatName ?? input.chatId ?? "(destinatario nao resolvido)",
-      instance: alias, tool: input.tool,
-      texts: input.texts.filter((t): t is string => typeof t === "string" && t.trim().length > 0),
-      violations: input.violations, approveUrl, rejectUrl, expiresBrt: toBRT(expiresAt) ?? expiresAt,
+    const day = new Date().toISOString().slice(0, 10);
+    const taskId = await brainSaveTask(EXPERT_BRAIN_PAT, {
+      title: `Voice guide: agente travando ao escrever pra ${input.chatRef}`,
+      details: voiceFeedbackMarkdown({ chatRef: input.chatRef, instance: alias, blocks: recent as any }),
+      dedupeKey: feedbackDedupeKey(input.instanceId ?? "default", input.chatRef, day),
+      tags: ["voice-guide", "calibracao"],
     });
-    brainTaskId = await brainSaveApprovalTask(EXPERT_BRAIN_PAT, {
-      title: `Aprovar envio retido: ${input.chatName ?? input.chatId ?? input.tool}`, details: md,
-    });
-    if (brainTaskId) await supabase.from("voice_pending_approval").update({ brain_task_id: brainTaskId }).eq("id", row.id);
-  } else {
-    console.error("[approval] EXPERT_BRAIN_PAT ausente — retencao sem card no Brain (approval_id " + row.id + ")");
-  }
-  return json({
-    ok: false, retained: true, reason: "voice_gate_approval", approval_id: row.id,
-    violations: input.violations, ...(brainTaskId && { brain_task: brainTaskId }),
-    expires_at: expiresAt,
-    instruction: "Envio RETIDO pelo voice gate (modo aprovacao): so sai com o clique do dono no card do board do Brain. NAO reenvie, NAO tente confirmed_voice (nao bypassa neste modo) e NAO reescreva pra contornar a regra sem pedido do dono. Se o dono estiver na conversa, avise que ha uma aprovacao pendente no board.",
-  });
-}
-
-// Re-executa o payload retido apos o clique de aprovacao. Autossuficiente: creds
-// resolvidas server-side por instance; imagem re-assina a URL do Storage na hora.
-async function releaseRetained(row: any): Promise<{ ok: boolean; result?: any; error?: string }> {
-  const p = row.payload ?? {};
-  try {
-    if (p.kind === "schedule") {
-      const { data, error } = await supabase.from("scheduled_sequences").insert(p.row).select("id").single();
-      if (error) return { ok: false, error: error.message };
-      return { ok: true, result: { scheduled_sequence_id: data.id } };
-    }
-    if (p.kind === "edge") {
-      let body = p.body;
-      if (p.storage_path) {
-        const { data: signed, error: signErr } = await supabase.storage.from("whatsapp-images").createSignedUrl(p.storage_path, 3600);
-        if (signErr || !signed?.signedUrl) return { ok: false, error: `signed url: ${signErr?.message ?? "sem url"}` };
-        body = { ...body, media_url: signed.signedUrl };
-      }
-      const { status, data } = await callEdge(p.edge, body);
-      if (status >= 400) return { ok: false, error: data?.error || `${p.edge} ${status}` };
-      if (p.post?.update_message) {
-        const u = p.post.update_message;
-        await supabase.from("messages").update({ [u.column]: u.value, is_edited: true }).eq("id", u.id);
-      }
-      return { ok: true, result: data };
-    }
-    return { ok: false, error: `payload kind desconhecido: ${p.kind}` };
+    if (taskId) console.log("[voice-feedback] task de correcao:", taskId);
   } catch (e) {
-    return { ok: false, error: (e as Error).message };
+    console.error("[voice-feedback] falhou:", (e as Error).message);
   }
-}
-
-function approvalPage(title: string, body: string, status = 200): Response {
-  const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head><body style="font-family:system-ui,sans-serif;max-width:480px;margin:48px auto;padding:0 16px"><h2>${title}</h2><p>${body}</p></body></html>`;
-  return new Response(html, { status, headers: { "content-type": "text/html; charset=utf-8", ...cors } });
-}
-
-// Valida o link e carrega a linha; erros viram pagina pronta.
-async function loadApprovalRow(url: URL): Promise<{ row?: any; action?: ApprovalAction; page?: Response }> {
-  const raw = url.searchParams.get("approval") ?? "";
-  const action = (url.searchParams.get("action") ?? "") as ApprovalAction;
-  const dot = raw.indexOf(".");
-  const id = dot > 0 ? raw.slice(0, dot) : "";
-  const token = dot > 0 ? raw.slice(dot + 1) : "";
-  if (!id || !token) return { page: approvalPage("Link invalido", "Parametros ausentes.", 400) };
-  const { data: row } = await supabase.from("voice_pending_approval").select("*").eq("id", id).maybeSingle();
-  if (!row) return { page: approvalPage("Nao encontrado", "Esta aprovacao nao existe.", 404) };
-  if (!timingSafeEqual(row.token_hash, await hashToken(token))) return { page: approvalPage("Link invalido", "Token nao confere.", 403) };
-  const d = approvalDecision(row, action, Date.now());
-  if (d.kind === "invalid") return { page: approvalPage("Acao invalida", "Use os links do card (Aprovar ou Recusar).", 400) };
-  if (d.kind === "already") return { page: approvalPage("Ja processado", `Este envio ja foi tratado (status: ${(d as any).status}). Nada foi feito agora.`) };
-  if (d.kind === "expired") {
-    await supabase.from("voice_pending_approval").update({ status: "expired", resolved_at: new Date().toISOString() }).eq("id", row.id).eq("status", "pending");
-    if (row.brain_task_id && EXPERT_BRAIN_PAT) await brainCompleteApprovalTask(EXPERT_BRAIN_PAT, row.brain_task_id, "Expirado sem decisao — nada foi enviado.");
-    return { page: approvalPage("Expirado", "O prazo de 24h passou. Nada foi enviado. Peca ao agente pra reenviar se ainda fizer sentido.") };
-  }
-  return { row, action };
-}
-
-const PIN_MAX_ATTEMPTS = 5;
-
-async function loadPinHash(): Promise<string | null> {
-  const { data } = await supabase.from("voice_approval_pin").select("pin_hash").eq("id", 1).maybeSingle();
-  return data?.pin_hash ?? null;
-}
-
-// GET: pagina de confirmacao com o campo de PIN (o fator que o agente nao tem).
-// Primeiro uso (sem PIN definido) pede criacao com confirmacao.
-async function handleApprovalClick(url: URL): Promise<Response> {
-  const r = await loadApprovalRow(url);
-  if (r.page) return r.page;
-  const row = r.row, action = r.action!;
-  if (row.pin_attempts >= PIN_MAX_ATTEMPTS) return approvalPage("Bloqueado", "Excesso de tentativas de PIN. Este envio nao pode mais ser aprovado por aqui — peca ao agente pra reenviar.", 403);
-  const hasPin = (await loadPinHash()) !== null;
-  const verb = action === "approve" ? "APROVAR e enviar" : "RECUSAR";
-  const dest = row.chat_name ?? row.chat_id ?? "(destinatario)";
-  const pinFields = hasPin
-    ? `<label>Seu PIN de aprovacao<br><input type="password" name="pin" inputmode="numeric" pattern="[0-9]{4,6}" required autofocus style="font-size:1.4em;letter-spacing:.3em;width:8em"></label>`
-    : `<p><strong>Primeiro uso:</strong> crie agora seu PIN de aprovacao (4 a 6 numeros). Ele vai ser pedido em toda aprovacao daqui pra frente.</p>
-       <label>Crie o PIN<br><input type="password" name="pin" inputmode="numeric" pattern="[0-9]{4,6}" required autofocus style="font-size:1.4em;letter-spacing:.3em;width:8em"></label><br><br>
-       <label>Repita o PIN<br><input type="password" name="pin2" inputmode="numeric" pattern="[0-9]{4,6}" required style="font-size:1.4em;letter-spacing:.3em;width:8em"></label>`;
-  const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Confirmar</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:480px;margin:48px auto;padding:0 16px">
-<h2>${verb}</h2><p>Destinatario: <strong>${dest}</strong> · ferramenta: ${row.tool}</p>
-<form method="post">${pinFields}<br><br><button type="submit" style="font-size:1.1em;padding:.5em 1.5em">${verb}</button></form>
-</body></html>`;
-  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", ...cors } });
-}
-
-// POST: valida o PIN e executa (approve/reject). PIN errado conta tentativa;
-// 5 erros travam a retencao (fail-closed — o agente reenvia se preciso).
-async function handleApprovalSubmit(req: Request, url: URL): Promise<Response> {
-  const r = await loadApprovalRow(url);
-  if (r.page) return r.page;
-  const row = r.row, action = r.action!;
-  if (row.pin_attempts >= PIN_MAX_ATTEMPTS) return approvalPage("Bloqueado", "Excesso de tentativas de PIN.", 403);
-  let form: FormData;
-  try { form = await req.formData(); } catch { return approvalPage("Requisicao invalida", "Envie o formulario da pagina de confirmacao.", 400); }
-  const pin = String(form.get("pin") ?? "");
-  if (!/^\d{4,6}$/.test(pin)) return approvalPage("PIN invalido", "O PIN tem 4 a 6 numeros. Volte e tente de novo.", 400);
-  const stored = await loadPinHash();
-  if (stored === null) {
-    const pin2 = String(form.get("pin2") ?? "");
-    if (pin !== pin2) return approvalPage("PIN nao confere", "Os dois campos precisam ser iguais. Volte e tente de novo.", 400);
-    // TOFU com corrida segura: se outro insert chegou primeiro, valida contra ele.
-    const { error: insErr } = await supabase.from("voice_approval_pin").insert({ id: 1, pin_hash: await hashToken(pin) });
-    if (insErr) {
-      const nowStored = await loadPinHash();
-      if (!nowStored || !timingSafeEqual(nowStored, await hashToken(pin))) return approvalPage("PIN ja definido", "Um PIN ja existe e este nao confere.", 403);
-    }
-  } else if (!timingSafeEqual(stored, await hashToken(pin))) {
-    const attempts = (row.pin_attempts ?? 0) + 1;
-    await supabase.from("voice_pending_approval").update({ pin_attempts: attempts }).eq("id", row.id);
-    return approvalPage("PIN incorreto", `Tentativa ${attempts} de ${PIN_MAX_ATTEMPTS}. Volte e tente de novo.`, 403);
-  }
-  // Claim atomico: so UM submit vence a corrida (UPDATE condicionado a pending).
-  const to = action === "approve" ? "approved" : "rejected";
-  const { data: claimed } = await supabase.from("voice_pending_approval")
-    .update({ status: to, resolved_at: new Date().toISOString() })
-    .eq("id", row.id).eq("status", "pending").select("id");
-  if (!claimed?.length) return approvalPage("Ja processado", "Outro clique chegou primeiro. Nada foi feito agora.");
-  if (to === "rejected") {
-    if (row.brain_task_id && EXPERT_BRAIN_PAT) await brainCompleteApprovalTask(EXPERT_BRAIN_PAT, row.brain_task_id, "RECUSADO pelo dono — nada foi enviado.");
-    return approvalPage("Recusado", `Nada foi enviado pra ${row.chat_name ?? row.chat_id ?? "o destinatario"}.`);
-  }
-  const rel = await releaseRetained(row);
-  if (!rel.ok) {
-    await supabase.from("voice_pending_approval").update({ status: "failed", error: rel.error ?? "erro desconhecido" }).eq("id", row.id);
-    if (row.brain_task_id && EXPERT_BRAIN_PAT) await brainCompleteApprovalTask(EXPERT_BRAIN_PAT, row.brain_task_id, `Aprovado, mas o envio FALHOU: ${rel.error}`);
-    return approvalPage("Falha no envio", `Voce aprovou, mas o envio falhou: ${rel.error}. O agente pode reenviar a mensagem normalmente.`, 502);
-  }
-  await supabase.from("voice_pending_approval").update({ sent_result: rel.result ?? null }).eq("id", row.id);
-  if (row.brain_task_id && EXPERT_BRAIN_PAT) await brainCompleteApprovalTask(EXPERT_BRAIN_PAT, row.brain_task_id, "APROVADO pelo dono — enviado.");
-  return approvalPage("Aprovado e enviado", `Mensagem liberada pra ${row.chat_name ?? row.chat_id ?? "o destinatario"}.`);
 }
 
 // ─── Executor de actions (reusado pelo legado {action,params} e pelo MCP tools/call) ───
@@ -1297,8 +1158,6 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
         if (type !== "text" && !media_url) return json({ error: `media_url obrigatorio pra type "${type}".` }, 400);
         const targetInstance = wantInstance ?? resolved.instance_id;
-        // Gate de voz roda mais abaixo, com o sendBody pronto: o modo approval
-        // retem o payload FINAL de replay (0057).
         if (!force_send_after_inbound && !resolved._new && !resolved.is_group) {
           const rows = await loadInstances();
           const selfPhone = rows.find((i: any) => i.instance_id === targetInstance)?.phone_connected ?? null;
@@ -1334,8 +1193,6 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(mentions?.length && { mentions }), ...(mentions_everyone && { mentions_everyone: true }) };
         const vg = await runVoiceGate([content], targetInstance, params, "send");
         if (vg.block) return vg.block;
-        if (vg.retain) return retainForApproval({ tool: "send", instanceId: targetInstance, chatId: resolved.chat_id, chatName: resolved.chat_name,
-          texts: [content], violations: vg.retain, payload: { kind: "edge", edge: "send-message", body: sendBody } });
         const { status, data } = await callEdge("send-message", sendBody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-message ${status}`, detail: data }, status);
         return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance,
@@ -1356,8 +1213,6 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(profile && { profile }), ...(model_id && { model_id }), ...(stability !== undefined && { stability }), ...(similarity_boost !== undefined && { similarity_boost }), ...(style !== undefined && { style }), ...(speed !== undefined && { speed }) };
         const vgv = await runVoiceGate([text], targetInstance, params, "send_voice");
         if (vgv.block) return vgv.block;
-        if (vgv.retain) return retainForApproval({ tool: "send_voice", instanceId: targetInstance, chatId: resolved.chat_id, chatName: resolved.chat_name,
-          texts: [text], violations: vgv.retain, payload: { kind: "edge", edge: "send-voice", body: vbody } });
         const { status, data } = await callEdge("send-voice", vbody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-voice ${status}`, detail: data }, status);
         return json({ ok: true, ...data, to: resolved.chat_name, instance: targetInstance, ...(vgv.warnings?.length && { voice_warnings: vgv.warnings }) });
@@ -1394,14 +1249,6 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const storagePath = `outbound/${targetInstance}/${resolved.chat_id}/${crypto.randomUUID()}.${ext}`;
         const { error: upErr } = await supabase.storage.from("whatsapp-images").upload(storagePath, bytes, { contentType: mime, upsert: false });
         if (upErr) return json({ error: `Storage upload: ${upErr.message}` }, 500);
-        if (vgi.retain) {
-          // Bytes ja hospedados: o release re-assina a URL na hora do clique (a
-          // signed URL de agora expiraria antes da aprovacao).
-          return retainForApproval({ tool: "send_image", instanceId: targetInstance, chatId: resolved.chat_id, chatName: resolved.chat_name,
-            texts: [caption], violations: vgi.retain,
-            payload: { kind: "edge", edge: "send-message", storage_path: storagePath,
-              body: { chat_id: resolved.chat_id, content: caption, message_type: "image", confirmed: true, agent_name: agent_name || "mcp-api", instance: targetInstance } } });
-        }
         const { data: signed, error: signErr } = await supabase.storage.from("whatsapp-images").createSignedUrl(storagePath, 3600);
         if (signErr || !signed?.signedUrl) return json({ error: `Signed URL: ${signErr?.message ?? "sem url"}` }, 500);
         const { status, data } = await callEdge("send-message", { chat_id: resolved.chat_id, content: caption, message_type: "image", media_url: signed.signedUrl, confirmed: true, agent_name: agent_name || "mcp-api", instance: targetInstance });
@@ -1448,10 +1295,6 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         });
         const vgs = await runVoiceGate(scheduleGateTexts(items), targetInstance, params, "schedule");
         if (vgs.block) return vgs.block;
-        if (vgs.retain) return retainForApproval({ tool: "schedule", instanceId: targetInstance, chatId: resolved.chat_id, chatName: resolved.chat_name,
-          texts: scheduleGateTexts(items), violations: vgs.retain,
-          payload: { kind: "schedule", row: { instance_id: targetInstance, chat_id: resolved.chat_id, chat_name: resolved.chat_name,
-            scheduled_at: when.toISOString(), items, created_by: agent_name || "mcp-api" } } });
         const { data: ins, error: insErr } = await supabase.from("scheduled_sequences").insert({
           instance_id: targetInstance, chat_id: resolved.chat_id, chat_name: resolved.chat_name,
           scheduled_at: when.toISOString(), items, created_by: agent_name || "mcp-api",
@@ -1578,11 +1421,6 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (vge.block) return vge.block;
         const phone = phoneForAction(msg.chat_id);
         const zapiParams: Record<string, unknown> = { phone, [rule.bodyKey]: new_content, [rule.field]: msg.provider_msg_id };
-        if (vge.retain) return retainForApproval({ tool: "edit_message", instanceId: msg.instance_id, chatId: msg.chat_id, chatName: msg.chat_id,
-          texts: [new_content], violations: vge.retain,
-          payload: { kind: "edge", edge: "wa-proxy",
-            body: { action: rule.action, params: zapiParams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id },
-            post: { update_message: { id: msg.id, column: rule.column, value: new_content } } } });
         const { status, data } = await callEdge("wa-proxy", { action: rule.action, params: zapiParams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance: msg.instance_id });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}` }, status);
         await supabase.from("messages").update({ [rule.column]: new_content, is_edited: true }).eq("id", msg.id);
@@ -1639,11 +1477,6 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           const gateInstance = defaultGateInstance(await loadInstances(), instance ? await resolveInstanceKey(instance) : null);
           const vgz = await runVoiceGate(zapiGateTexts(zparams), gateInstance, params, "zapi_action:" + zaction);
           if (vgz.block) return vgz.block;
-          if (vgz.retain) return retainForApproval({ tool: "zapi_action:" + zaction, instanceId: gateInstance,
-            chatId: (zparams.phone as string) ?? null, chatName: (zparams.phone as string) ?? null,
-            texts: zapiGateTexts(zparams), violations: vgz.retain,
-            payload: { kind: "edge", edge: "wa-proxy",
-              body: { action: zaction, params: zparams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance } } });
         }
         const { status, data } = await callEdge("wa-proxy", { action: zaction, params: zparams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}`, detail: data }, status);
@@ -1893,7 +1726,6 @@ const TOOL_SCHEMAS = [
         reply_to: { type: "string", description: "Mensagem a citar (quote): 'last' | 'last_received' | 'last_sent' (posicional, dispensa read) ou UUID de read/search" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true para enviar; so apos o usuario confirmar" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o texto exato apos ver as violacoes — nunca por iniciativa propria" },
-        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
         allow_new: { type: "boolean", description: "Permite enviar pra numero novo (primeiro contato); exige instance" },
         humanize: { type: "boolean", description: "Calcula delay_typing automatico por tamanho/tipo (default true)" },
         delay_typing: { type: "number", description: "Override do delay de digitacao (0-15s)" },
@@ -1937,7 +1769,6 @@ const TOOL_SCHEMAS = [
         speed: { type: "number", description: "0.7-1.2 (default 0.95; ignorado com profile)" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o texto exato apos ver as violacoes — nunca por iniciativa propria" },
-        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
       },
       required: ["to", "text"],
@@ -1955,7 +1786,6 @@ const TOOL_SCHEMAS = [
         caption: { type: "string", description: "Legenda da imagem (opcional)" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente a legenda exata apos ver as violacoes — nunca por iniciativa propria" },
-        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
       },
       required: ["to", "image_base64"],
@@ -2090,7 +1920,6 @@ const TOOL_SCHEMAS = [
         instance: { type: "string", description: "Com chat: instancia quando o chat existe nas duas" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o novo texto exato apos ver as violacoes — nunca por iniciativa propria" },
-        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
       },
       required: ["new_content"],
       additionalProperties: false,
@@ -2134,7 +1963,6 @@ const TOOL_SCHEMAS = [
         params: { type: "object", description: "Parametros da action", additionalProperties: true },
         confirmed: { type: "boolean", description: "Obrigatorio true para actions de envio" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o texto exato apos ver as violacoes — nunca por iniciativa propria" },
-        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
         instance: { type: "string", description: "De qual numero (alias ou instance_id)" },
       },
       required: ["action", "params"],
@@ -2240,7 +2068,6 @@ const TOOL_SCHEMAS = [
         instance: { type: "string", description: "Instancia (alias ou instance_id); default: herda a do chat" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos o usuario confirmar o resumo do agendamento" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente os textos exatos apos ver as violacoes — nunca por iniciativa propria" },
-        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
       },
       required: ["to", "at", "items"],
       additionalProperties: false,
@@ -2419,8 +2246,6 @@ Deno.serve(async (req) => {
   // Publico no gateway (funcao ja e --no-verify-jwt); seguranca = token secreto
   // de 32 bytes (hash em tempo constante) + PIN do dono (fator que o agente nao
   // tem — TOFU no primeiro uso, 5 tentativas).
-  if (req.method === "GET" && url.searchParams.has("approval")) return handleApprovalClick(url);
-  if (req.method === "POST" && url.searchParams.has("approval")) return handleApprovalSubmit(req, url);
 
   // ── MCP (protegido) ──
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
