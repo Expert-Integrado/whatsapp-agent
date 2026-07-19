@@ -1,5 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { getProvider, type OutboundMessage, type InstanceCreds } from "../_shared/wa/index.ts";
+import { redactSecrets, safeFetch } from "../_shared/wa/redact.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -220,14 +221,15 @@ Deno.serve(async (req) => {
       link: link ?? undefined,
     };
     const built = await provider.buildSend(instance, outbound);
-    const r = await fetch(built.url, { method: built.method, headers: built.headers, body: built.body });
+    const r = await safeFetch(built.url, { method: built.method, headers: built.headers, body: built.body });
     if (!r.ok) throw new Error(`${instance.provider} ${r.status}: ${await r.text()}`);
     const realId = provider.parseSendResult(await r.json()).providerMsgId || `sent-${tempId}`;
     await supabase.from("messages").update({ provider_msg_id: realId, send_status: "sent" }).eq("id", msg!.id);
     return json({ ok: true, message_id: msg!.id, provider_msg_id: realId, agent: agent_name ?? "unknown" });
   } catch (e) {
-    await supabase.from("messages").update({ send_status: "failed", send_error: String(e) }).eq("id", msg!.id);
-    return json({ error: String(e) }, 500);
+    const errText = redactSecrets(String(e));
+    await supabase.from("messages").update({ send_status: "failed", send_error: errText }).eq("id", msg!.id);
+    return json({ error: errText }, 500);
   }
 });
 

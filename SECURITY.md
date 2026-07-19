@@ -1,7 +1,7 @@
 # SECURITY — WhatsApp Agent
 
 > Documento de modelo de ameaças, guard rails reais e runbooks de incidente.
-> Atualizar SEMPRE que mexer em send/auth/credenciais. Última revisão: 2026-07-18 (arquitetura v3: Edge Functions + MCP-over-HTTP + voice gate).
+> Atualizar SEMPRE que mexer em send/auth/credenciais. Última revisão: 2026-07-19 (redação de secrets em erros: `redact.ts`).
 
 ## 1. Arquitetura de segurança (v3)
 
@@ -17,6 +17,7 @@ Não existe mais processo MCP local: o runtime inteiro são **Edge Functions no 
 | Anti-atropelo | Gate de *inbound recente*: se o contato mandou mensagem há <10 min e não foi respondida, o `send` bloqueia (`force_send_after_inbound` destrava conscientemente). |
 | Auditoria | `wa_action_log` (toda action do `wa-proxy`, com `agent_name` + `agent_request_id`), `messages.sent_by_agent`/`agent_name`, `voice_bypass_log` (0056: todo envio liberado por `confirmed_voice` em gate `block`) e `voice_block_log` (0058: toda recusa do gate; 3+ no mesmo chat em 15 min + Expert Brain conectado = task de calibração do voice guide no board do dono). |
 | Massa | O MCP **não tem tool batch** por design: 1 chamada = 1 chat. |
+| **Redação de secrets em erros** (19/07/2026) | A Z-API exige o `auth_token` no **path** da URL; o TypeError de rede do Deno embute a URL completa na mensagem. `redactSecrets()`/`safeFetch()` (`_shared/wa/redact.ts`) sanitizam na fonte (todo fetch de URL com secret re-lança redigido) e em toda fronteira que grava/retorna erro (`messages.send_error`, `wa_action_log.error`, `scheduled_sequences.error`, `message_media.download_error`, respostas HTTP). Cobre também query params de signed URL (`Authorization=`, `token=`) e userinfo em `base_url`. Mesma classe do incidente do Instagram Agent (fix `dcdf6d9` lá); scan retroativo de 19/07 nas 5 colunas de erro: **0 vazamentos**. |
 
 ## 2. Limitações reconhecidas (NÃO mitigado)
 
@@ -39,6 +40,13 @@ Não existe mais processo MCP local: o runtime inteiro são **Edge Functions no 
 
 1. `service_role`: Dashboard Supabase → Settings → API → *Reset service_role* (invalida a antiga na hora). `MCP_API_KEY`: `supabase secrets set MCP_API_KEY=<nova>` + atualizar o cliente MCP.
 2. Audit: `SELECT COUNT(*) FROM messages WHERE created_at > '<hora_vazamento>' AND from_me = true;` e `SELECT * FROM wa_action_log WHERE created_at > '<hora>' ORDER BY created_at DESC;`.
+
+### Token do provider apareceu em coluna de erro
+
+1. Scan: `SELECT count(*) FROM <tabela> WHERE <col_erro> ~ '/token/[A-Za-z0-9]{8,}'` nas colunas `messages.send_error`, `wa_action_log.error`, `scheduled_sequences.error`; para signed URLs de mídia, `~* '[?&](authorization|token|apikey|access_token)='` em `message_media.download_error` e `webhook_events_raw.error`. (`wa_action_log` é particionada: o SELECT no parent varre as partições vivas, ~90 dias.)
+2. Mask preservando o resto da mensagem: `UPDATE <tabela> SET <col> = regexp_replace(<col>, '(/token/)[A-Za-z0-9]+', '\1REDACTED', 'g') WHERE <col> ~ '/token/[A-Za-z0-9]+';`.
+3. **Rotacionar o token da instância afetada** (painel do provider + `UPDATE wa_instance`): mascarar é higiene — a mesma string já pode ter saído em resposta HTTP entregue, e partições antigas dropadas não são auditáveis.
+4. Causa raiz: alguma fronteira nova gravando/retornando erro sem `redactSecrets()` — achar e corrigir (guard: todo fetch de URL com secret usa `safeFetch`).
 
 ### Disparou mensagem errada
 

@@ -1,6 +1,7 @@
 import { registerProvider, type WaProvider } from "./provider.ts";
 import type { InstanceCreds, OutboundMessage, BuiltRequest, SendResult, MsgType, InboundEvent, SendStatus, MediaRef, MediaPayload, NeutralGroup, WaAction } from "./types.ts";
 import { digitsFromJid, isGroupJid } from "./jid.ts";
+import { safeFetch } from "./redact.ts";
 
 const MEDIA_TYPE: Partial<Record<MsgType, "image"|"video"|"document">> = {
   image: "image", video: "video", document: "document",
@@ -271,7 +272,7 @@ export class EvolutionProvider implements WaProvider {
     let lastErr: unknown;
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
       try {
-        const res = await fetch(url, {
+        const res = await safeFetch(url, {
           method: "POST",
           headers,
           body,
@@ -479,7 +480,7 @@ export class EvolutionProvider implements WaProvider {
   async fetchGroups(creds: InstanceCreds): Promise<NeutralGroup[]> {
     const url = `${this.u(creds, "group/fetchAllGroups")}?getParticipants=false`;
     const headers = this.h(creds);
-    const res = await fetch(url, { method: "GET", headers });
+    const res = await safeFetch(url, { method: "GET", headers });
     if (!res.ok) throw new Error(`fetchGroups HTTP ${res.status}`);
     const json: any[] = await res.json();
     return json.map((group: any) => ({

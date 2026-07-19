@@ -18,6 +18,7 @@
 // volta pra 'pending' preservando items_sent e o proximo cron RESUME de onde parou.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { redactSecrets } from "../_shared/wa/redact.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
@@ -97,7 +98,8 @@ async function dispatchItem(seq: Seq, item: any, index: number): Promise<string 
     });
   }
   if (r.status >= 400 || r.data?.error) {
-    return r.data?.error ? String(r.data.error) : `HTTP ${r.status}`;
+    // redact de 2o grau: resposta de edge antigo (janela de deploy parcial) pode conter token
+    return r.data?.error ? redactSecrets(String(r.data.error)) : `HTTP ${r.status}`;
   }
   return null;
 }
@@ -113,7 +115,7 @@ async function processSequence(seq: Seq, deadline: number): Promise<string> {
       return "pending";
     }
     const item = items[i];
-    const errMsg = await dispatchItem(seq, item, i).catch((e) => String(e?.message ?? e));
+    const errMsg = await dispatchItem(seq, item, i).catch((e) => redactSecrets(String(e?.message ?? e)));
     if (errMsg) {
       await supabase.from("scheduled_sequences")
         .update({ status: "failed", error: `item ${i} (${item?.type}): ${errMsg}`.slice(0, 500), finished_at: new Date().toISOString() })
@@ -176,7 +178,7 @@ Deno.serve(async (_req) => {
     return json({ ok: true, processed: Object.keys(results).length, results });
   } catch (e) {
     console.error("dispatch-scheduled error:", e);
-    return json({ ok: false, error: String((e as Error)?.message ?? e) }, 500);
+    return json({ ok: false, error: redactSecrets(String((e as Error)?.message ?? e)) }, 500);
   }
 });
 

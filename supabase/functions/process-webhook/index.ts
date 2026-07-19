@@ -6,6 +6,7 @@ import {
   type MediaRef,
 } from "../_shared/wa/index.ts";
 import type { WaProvider } from "../_shared/wa/provider.ts";
+import { redactSecrets } from "../_shared/wa/redact.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -435,7 +436,7 @@ async function downloadMediaToStorage(
       .eq("id", mediaRow!.id);
   } catch (e) {
     await supabase.from("message_media")
-      .update({ download_status: "pending", download_error: String(e) })
+      .update({ download_status: "pending", download_error: redactSecrets(String(e)) })
       .eq("id", mediaRow!.id);
   }
 }

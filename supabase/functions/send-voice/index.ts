@@ -19,6 +19,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { checkSendRateLimit } from "../_shared/rate-limit.ts";
 import { getProvider, type InstanceCreds } from "../_shared/wa/index.ts";
 import { humanize, type HumanizeLevel } from "../_shared/humanize.ts";
+import { redactSecrets, safeFetch } from "../_shared/wa/redact.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -334,7 +335,7 @@ Deno.serve(async (req) => {
     const provider = getProvider(creds.provider);
     const built = await provider.buildSend(creds, { chatId: chat_id, phone, type: "ptt", media: { url: signed.signedUrl } });
     const sendAbort = AbortSignal.timeout(ZAPI_TIMEOUT_MS);
-    const res = await fetch(built.url, { method: built.method, headers: built.headers, body: built.body, signal: sendAbort });
+    const res = await safeFetch(built.url, { method: built.method, headers: built.headers, body: built.body, signal: sendAbort });
     if (!res.ok) throw new Error(`${creds.provider} audio ${res.status}: ${(await res.text()).slice(0,200)}`);
     const realId = provider.parseSendResult(await res.json()).providerMsgId || `sent-${tempId}`;
 
@@ -367,7 +368,8 @@ Deno.serve(async (req) => {
 
     return json({ ok: true, action: "send-voice", status: 200, result: resultBody });
   } catch (e) {
-    const errorText = String((e as Error)?.message ?? e).slice(0, 500);
+    // redact ANTES do slice: truncar primeiro poderia cortar o token no meio
+    const errorText = redactSecrets(String((e as Error)?.message ?? e)).slice(0, 500);
     const durationMs = Date.now() - startTs;
     await supabase.from("messages").update({
       send_status: "failed",

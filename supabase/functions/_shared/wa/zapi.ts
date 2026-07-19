@@ -5,6 +5,7 @@ import type {
 import type { WaProvider } from "./provider.ts";
 import { registerProvider } from "./provider.ts";
 import { isLidJid } from "./jid.ts";
+import { safeFetch } from "./redact.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -15,7 +16,7 @@ async function fetchGroupParticipants(
   groupId: string,
 ): Promise<string[]> {
   try {
-    const r = await fetch(`${base}/group-metadata/${encodeURIComponent(groupId)}`, { headers });
+    const r = await safeFetch(`${base}/group-metadata/${encodeURIComponent(groupId)}`, { headers });
     if (!r.ok) return [];
     const m = await r.json();
     const parts = Array.isArray(m?.participants) ? m.participants : [];
@@ -59,7 +60,7 @@ async function zapieFetchWithRetry(url: string, timeoutMs: number, attempts = 2)
     try {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), timeoutMs);
-      const res = await fetch(url, {
+      const res = await safeFetch(url, {
         signal: ac.signal,
         headers: { "User-Agent": "whatsapp-agent/1.0" },
       });
@@ -122,7 +123,7 @@ async function zapiResolveLidToPhone(
   // Layer 3: Z-API contacts endpoint
   try {
     const base = `https://api.z-api.io/instances/${creds.instance_id}/token/${creds.auth_token}`;
-    const r = await fetch(
+    const r = await safeFetch(
       `${base}/contacts/${encodeURIComponent(lid)}`,
       { headers: { "Client-Token": creds.client_token! } },
     );
@@ -494,7 +495,7 @@ export class ZapiProvider implements WaProvider {
     const headers: Record<string, string> = {
       "Client-Token": creds.client_token!,
     };
-    const r = await fetch(`${base}/chats`, { headers });
+    const r = await safeFetch(`${base}/chats`, { headers });
     if (!r.ok) return [];
     const raw = await r.json();
     const allChats: Record<string, unknown>[] = Array.isArray(raw)

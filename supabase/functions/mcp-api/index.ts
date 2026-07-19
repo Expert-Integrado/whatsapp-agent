@@ -16,6 +16,7 @@ import { ZAPI_SEND_ACTIONS, zapiGateTexts, scheduleGateTexts, defaultGateInstanc
 import { feedbackDedupeKey, shouldOpenFeedbackTask, voiceFeedbackMarkdown } from "../_shared/wa/voice-feedback.ts";
 import { brainSaveTask } from "../_shared/wa/brain-client.ts";
 import { normalizeForVoiceCheck } from "../_shared/wa/voice-normalize.ts";
+import { redactSecrets } from "../_shared/wa/redact.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -269,7 +270,7 @@ async function transcribeAudio(mediaUrl: string, mimeHint?: string): Promise<str
     const wr = await fetch("https://api.openai.com/v1/audio/transcriptions", { method: "POST", headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }, body: formData });
     if (!wr.ok) return `Erro ao transcrever: OpenAI ${wr.status} — ${(await wr.text()).slice(0, 120)}`;
     return (await wr.text()).trim() || "(audio sem fala detectada)";
-  } catch (e) { return `Erro ao transcrever: ${(e as Error).message}`; }
+  } catch (e) { return `Erro ao transcrever: ${redactSecrets(String((e as Error).message))}`; }
 }
 async function enrichWithTranscriptions(messages: any[]): Promise<any[]> {
   const audioMessages = messages.filter(m => AUDIO_TYPES.has(m.message_type));
@@ -745,7 +746,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           const [waData, totalRes, todayRes] = await Promise.all([
             callEdge("wa-proxy", { action: "status", method: "GET", agent_name: "mcp-api", instance: inst.alias ?? inst.instance_id })
               .then(({ data }) => data?.result)
-              .catch((e) => ({ error: String((e as Error)?.message ?? e) })),
+              .catch((e) => ({ error: redactSecrets(String((e as Error)?.message ?? e)) })),
             supabase.from("messages").select("*", { count: "estimated", head: true }).eq("instance_id", inst.instance_id),
             supabase.from("messages").select("*", { count: "exact", head: true }).eq("instance_id", inst.instance_id).gte("created_at", dayAgo),
           ]);
@@ -1644,7 +1645,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
       default: return json({ error: "action_not_implemented", action }, 400);
     }
   } catch (e) {
-    return json({ error: String((e as Error)?.message ?? e) }, 500);
+    return json({ error: redactSecrets(String((e as Error)?.message ?? e)) }, 500);
   }
 }
 

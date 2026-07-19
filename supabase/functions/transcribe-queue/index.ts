@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { redactSecrets } from "../_shared/wa/redact.ts";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ Deno.serve(async (req) => {
     return json({ ok: true, ...result });
   } catch (e) {
     console.error("transcribe-queue error:", e);
-    return json({ ok: false, error: String(e) }, 500);
+    return json({ ok: false, error: redactSecrets(String(e)) }, 500);
   }
 });
 

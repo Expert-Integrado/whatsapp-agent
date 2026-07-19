@@ -24,6 +24,7 @@ import {
   type Category,
 } from "../_shared/rate-limit.ts";
 import { getProvider } from "../_shared/wa/index.ts";
+import { redactSecrets, safeFetch } from "../_shared/wa/redact.ts";
 import type { InstanceCreds } from "../_shared/wa/types.ts";
 
 const supabase = createClient(
@@ -302,7 +303,7 @@ Deno.serve(async (req) => {
   try {
     if (action === "status") {
       const built = provider.buildAction(creds, "status", {});
-      const r = await fetch(built!.url, {
+      const r = await safeFetch(built!.url, {
         method: built!.method,
         headers: built!.headers,
         signal: AbortSignal.timeout(ZAPI_TIMEOUT_MS),
@@ -326,7 +327,7 @@ Deno.serve(async (req) => {
         }
         return json({ error: "not_supported_by_provider", action, provider: creds.provider }, 400);
       }
-      const r = await fetch(built.url, {
+      const r = await safeFetch(built.url, {
         method: built.method,
         headers: built.headers,
         body: built.body,
@@ -340,7 +341,8 @@ Deno.serve(async (req) => {
       }
     }
   } catch (e) {
-    errorText = String(e).slice(0, 500);
+    // redact antes do slice: truncar primeiro poderia cortar o token no meio
+    errorText = redactSecrets(String(e)).slice(0, 500);
     resultStatus = 504;
   }
 
