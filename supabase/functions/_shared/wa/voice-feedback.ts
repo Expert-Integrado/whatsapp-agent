@@ -23,7 +23,9 @@ export function voiceFeedbackMarkdown(input: {
   const counts = new Map<string, number>();
   for (const b of input.blocks) for (const r of b.rule_ids) counts.set(r, (counts.get(r) ?? 0) + 1);
   const rules = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `- ${r} (${n}x)`).join("\n");
-  const examples = input.blocks.slice(-3).map((b) => `> [${b.tool}] ${b.text_preview ?? "(sem preview)"}`).join("\n>\n");
+  // Preview vem de texto de terceiro: colapsa quebras de linha pra ele nunca
+  // escapar do blockquote e injetar markdown/instrucao no card do dono.
+  const examples = input.blocks.slice(-3).map((b) => `> [${b.tool}] ${(b.text_preview ?? "(sem preview)").replace(/\s*\r?\n\s*/g, " ")}`).join("\n>\n");
   return [
     `O agente travou ${input.blocks.length}x seguidas no voice gate tentando escrever pra **${input.chatRef}** (instância ${input.instance}) — ele corrige e tenta de novo, mas está patinando nas mesmas regras.`,
     ``,

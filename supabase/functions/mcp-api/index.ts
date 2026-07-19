@@ -649,7 +649,7 @@ async function loadVoiceGuide(instanceId?: string | null): Promise<any | null> {
 // violacao severity=high a menos que confirmed_voice:true (aprovacao explicita do
 // dono). Decisao pura em _shared/wa/voice-gate.ts (testada). loadInstances tem
 // cache por isolate — mudanca de modo pega em minutos, nao precisa redeploy.
-async function runVoiceGate(texts: (string | null | undefined)[], instanceId: string | null | undefined, params: any, tool = "send"):
+async function runVoiceGate(texts: (string | null | undefined)[], instanceId: string | null | undefined, params: any, tool = "send", chatRef?: string):
   Promise<{ block?: Response; warnings?: VoiceViolation[] }> {
   if (!texts.some((t) => typeof t === "string" && t.trim())) return {};
   const rows = await loadInstances();
@@ -662,7 +662,7 @@ async function runVoiceGate(texts: (string | null | undefined)[], instanceId: st
   if (r.blocked) {
     // Log do bloqueio + eventual task de correcao do voice guide (0058) — o
     // feedback nunca impede a recusa nem muda o contrato: corrigir e reenviar.
-    await logBlockAndMaybeOpenFeedback({ instanceId: instanceId ?? null, chatRef: chatRefFrom(params), tool,
+    await logBlockAndMaybeOpenFeedback({ instanceId: instanceId ?? null, chatRef: chatRef ?? chatRefFrom(params), tool,
       ruleIds: r.violations.map((v) => v.id),
       preview: texts.filter((t): t is string => typeof t === "string" && t.trim().length > 0).join(" | ").slice(0, 500) });
     return { block: json({ ok: false, blocked: true, reason: "voice_gate", violations: r.violations,
@@ -689,7 +689,7 @@ async function runVoiceGate(texts: (string | null | undefined)[], instanceId: st
 const FEEDBACK_WINDOW_MIN = 15;
 
 function chatRefFrom(params: any): string {
-  return String(params?.to ?? params?.chat ?? params?.params?.phone ?? "-").slice(0, 60);
+  return String(params?.to ?? params?.chat ?? params?.params?.phone ?? "-").replace(/s+/g, " ").trim().slice(0, 60) || "-";
 }
 
 async function logBlockAndMaybeOpenFeedback(input: {
@@ -702,10 +702,12 @@ async function logBlockAndMaybeOpenFeedback(input: {
     if (error) { console.error("[voice-feedback] log falhou:", error.message); return; }
     if (!EXPERT_BRAIN_PAT) return;
     const since = new Date(Date.now() - FEEDBACK_WINDOW_MIN * 60000).toISOString();
-    const { data: recent } = await supabase.from("voice_block_log")
+    let recentQ = supabase.from("voice_block_log")
       .select("tool,rule_ids,text_preview")
       .eq("chat_ref", input.chatRef).gte("created_at", since)
       .order("created_at", { ascending: true }).limit(50);
+    if (input.instanceId) recentQ = recentQ.eq("instance_id", input.instanceId);
+    const { data: recent } = await recentQ;
     if (!recent || !shouldOpenFeedbackTask(recent.length)) return;
     const rows = await loadInstances();
     const alias = rows.find((r: any) => r.instance_id === input.instanceId)?.alias ?? input.instanceId ?? "default";
@@ -1191,7 +1193,9 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(media_url && { media_url }), ...(file_name && { file_name }), ...(quotedId && { quoted_msg_id: quotedId }),
           ...(effectiveDelayTyping !== undefined && { delay_typing: effectiveDelayTyping }), ...(delay_message !== undefined && { delay_message }),
           ...(mentions?.length && { mentions }), ...(mentions_everyone && { mentions_everyone: true }) };
-        const vg = await runVoiceGate([content], targetInstance, params, "send");
+        // link.title/description renderizam como texto visivel no card de preview
+        // — entram no gate junto do content (achado da revisao 19/07).
+        const vg = await runVoiceGate([content, link?.title, link?.description], targetInstance, params, "send", resolved.chat_id);
         if (vg.block) return vg.block;
         const { status, data } = await callEdge("send-message", sendBody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-message ${status}`, detail: data }, status);
@@ -1211,7 +1215,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const targetInstance = (instance ? await resolveInstanceKey(instance) : null) ?? resolved.instance_id;
         const vbody: any = { chat_id: resolved.chat_id, text, voice_id, confirmed: true, agent_name: agent_name || "mcp-api", agent_request_id: crypto.randomUUID(), instance: targetInstance,
           ...(profile && { profile }), ...(model_id && { model_id }), ...(stability !== undefined && { stability }), ...(similarity_boost !== undefined && { similarity_boost }), ...(style !== undefined && { style }), ...(speed !== undefined && { speed }) };
-        const vgv = await runVoiceGate([text], targetInstance, params, "send_voice");
+        const vgv = await runVoiceGate([text], targetInstance, params, "send_voice", resolved.chat_id);
         if (vgv.block) return vgv.block;
         const { status, data } = await callEdge("send-voice", vbody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-voice ${status}`, detail: data }, status);
@@ -1244,7 +1248,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         if (resolved.error) return json({ ok: false, error: resolved.error });
         if (resolved.candidates) return json({ ok: true, ambiguous: true, candidates: resolved.candidates, hint: "2+ chats casam com esse destinatario. NAO escolha sozinho: mostre os candidatos ao usuario e reenvie com o chat_id exato confirmado." });
         const targetInstance = (instance ? await resolveInstanceKey(instance) : null) ?? resolved.instance_id;
-        const vgi = await runVoiceGate([caption], targetInstance, params, "send_image");
+        const vgi = await runVoiceGate([caption], targetInstance, params, "send_image", resolved.chat_id);
         if (vgi.block) return vgi.block;
         const storagePath = `outbound/${targetInstance}/${resolved.chat_id}/${crypto.randomUUID()}.${ext}`;
         const { error: upErr } = await supabase.storage.from("whatsapp-images").upload(storagePath, bytes, { contentType: mime, upsert: false });
@@ -1293,7 +1297,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(warning && { warning }),
           instruction: "Mostre destinatario + horario (BRT) + itens ao usuario e so reenvie com confirmed:true apos ele confirmar.",
         });
-        const vgs = await runVoiceGate(scheduleGateTexts(items), targetInstance, params, "schedule");
+        const vgs = await runVoiceGate(scheduleGateTexts(items), targetInstance, params, "schedule", resolved.chat_id);
         if (vgs.block) return vgs.block;
         const { data: ins, error: insErr } = await supabase.from("scheduled_sequences").insert({
           instance_id: targetInstance, chat_id: resolved.chat_id, chat_name: resolved.chat_name,
@@ -1417,7 +1421,7 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         const ageMs = Date.now() - (msg.message_ts ? new Date(msg.message_ts).getTime() : 0);
         if (ageMs > 15 * 60 * 1000) return json({ error: `Janela de 15min expirada. Use delete + send.` }, 400);
         if (!confirmed) return json({ blocked: true, needs_confirmation: true, message_id: msg.id, target_message: messagePreview(msg), new_content, instruction: "Mostre a mensagem e o novo texto ao usuario; reenvie com confirmed:true e ESTE message_id apos ele confirmar." });
-        const vge = await runVoiceGate([new_content], msg.instance_id, params, "edit_message");
+        const vge = await runVoiceGate([new_content], msg.instance_id, params, "edit_message", msg.chat_id);
         if (vge.block) return vge.block;
         const phone = phoneForAction(msg.chat_id);
         const zapiParams: Record<string, unknown> = { phone, [rule.bodyKey]: new_content, [rule.field]: msg.provider_msg_id };
@@ -1473,14 +1477,16 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
         // edit-message/send-poll carregam texto livre — sem isto o zapi_action seria
         // bypass do gate das 5 tools oficiais. Sem `instance` explicita o wa-proxy
         // usa a default, entao o gate resolve pela default tambem (nunca fica sem gate).
+        let zapiWarnings: VoiceViolation[] | undefined;
         if (ZAPI_SEND_ACTIONS.has(zaction)) {
           const gateInstance = defaultGateInstance(await loadInstances(), instance ? await resolveInstanceKey(instance) : null);
           const vgz = await runVoiceGate(zapiGateTexts(zparams), gateInstance, params, "zapi_action:" + zaction);
           if (vgz.block) return vgz.block;
+          zapiWarnings = vgz.warnings;
         }
         const { status, data } = await callEdge("wa-proxy", { action: zaction, params: zparams, confirmed: true, agent_name: "mcp-api", agent_request_id: crypto.randomUUID(), instance });
         if (status >= 400) return json({ ok: false, error: data?.error || `zapi ${status}`, detail: data }, status);
-        return json({ ok: true, action: zaction, result: data?.result });
+        return json({ ok: true, action: zaction, result: data?.result, ...(zapiWarnings?.length && { voice_warnings: zapiWarnings }) });
       }
 
       case "transcribe": {
@@ -2242,11 +2248,6 @@ Deno.serve(async (req) => {
   }
   if (req.method === "GET" && path.endsWith("/authorize")) return handleAuthorize(url);
   if (req.method === "POST" && path.endsWith("/token")) return handleToken(req);
-  // Aprovacao out-of-band (0057): clique do dono vindo do card do Brain.
-  // Publico no gateway (funcao ja e --no-verify-jwt); seguranca = token secreto
-  // de 32 bytes (hash em tempo constante) + PIN do dono (fator que o agente nao
-  // tem — TOFU no primeiro uso, 5 tentativas).
-
   // ── MCP (protegido) ──
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   if (!MCP_API_KEY) return json({ error: "server_misconfigured: MCP_API_KEY ausente" }, 500);

@@ -61,9 +61,12 @@ const DESTRUCTIVE_SEND_ACTIONS = new Set([
   "send-poll",
   "forward",           // canônico Z-API (substitui forward-message)
   "forward-message",   // alias retrocompat
-  "send-image",        // só via edit_message (editImageMessageId) — envio normal usa /send-message
-  "send-video",        // só via edit_message (editVideoMessageId) — envio normal usa /send-message
-  "send-document",     // só via edit_message (editDocumentMessageId) — envio normal usa /send-message
+  // send-image/video/document: uso oficial e a edicao (edit*MessageId), mas nada
+  // aqui impede um envio fresco — por isso as tres tambem estao em ZAPI_SEND_ACTIONS
+  // (confirmacao + voice gate no mcp-api). Envio normal de midia usa /send-message.
+  "send-image",
+  "send-video",
+  "send-document",
 ]);
 
 // DESTRUCTIVE outras (rate limit só global)

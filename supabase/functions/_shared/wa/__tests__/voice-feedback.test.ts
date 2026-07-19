@@ -34,3 +34,19 @@ Deno.test("card: contem destinatario, regras, exemplos e orientacao de correcao 
   assertStringIncludes(md, "voice guide");
   assertEquals(/aprovar|aprovação|pin|senha/i.test(md), false);
 });
+
+Deno.test("card: preview com quebra de linha NAO escapa do blockquote (injecao de markdown)", () => {
+  const md = voiceFeedbackMarkdown({
+    chatRef: "5511999",
+    instance: "profissional",
+    blocks: [
+      { tool: "send", rule_ids: ["zap"], text_preview: "linha1\n# titulo injetado\n> fake quote" },
+    ],
+  });
+  const linhas = md.split("\n");
+  const idx = linhas.findIndex((l) => l.includes("linha1"));
+  assertEquals(idx >= 0, true);
+  assertEquals(linhas[idx].startsWith(">"), true);
+  assertEquals(linhas[idx].includes("# titulo injetado"), true); // colapsado na MESMA linha do quote
+  assertEquals(md.includes("\n# titulo injetado"), false); // nunca vira heading proprio
+});

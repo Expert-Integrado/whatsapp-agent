@@ -4,9 +4,13 @@
 // no gate e qual instancia resolve o modo quando o caller omite 'instance').
 // Mudou a lista de campos ou a precedencia? O teste gate-inputs.test.ts acusa.
 
-// Actions do zapi_action que carregam conteudo pra fora — todas passam pelo gate.
+// Actions do zapi_action que carregam conteudo pra fora — todas passam pelo gate
+// e pela confirmacao. send-image/video/document entram (revisao 19/07): o wa-proxy
+// as allowlista pra edicao, mas nada impede um envio FRESCO com caption livre —
+// sem elas aqui, esse caminho saia sem confirmacao e sem gate.
 export const ZAPI_SEND_ACTIONS = new Set([
   "send-poll", "forward-message", "forward", "edit-message", "send-text", "send-message",
+  "send-image", "send-video", "send-document",
 ]);
 
 // Campos de texto livre que uma action de envio da Z-API pode carregar.
@@ -28,6 +32,8 @@ export function scheduleGateTexts(items: unknown): (string | null | undefined)[]
   return items.flatMap((it: any) => [
     it?.content,
     it?.question,
+    it?.link?.title,
+    it?.link?.description,
     ...(Array.isArray(it?.options) ? it.options : []),
   ]);
 }

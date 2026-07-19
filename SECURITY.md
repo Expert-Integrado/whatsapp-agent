@@ -13,14 +13,14 @@ Não existe mais processo MCP local: o runtime inteiro são **Edge Functions no 
 | Edges internas (`send-message`, `send-voice`, `wa-proxy`) | `verify_jwt: true` — só aceitam chamada com JWT do projeto (a `mcp-api` chama com o JWT interno). |
 | Webhook (`process-webhook`) | Autenticação **TOFU por instância** (`wa_instance.webhook_token`, migration 0029) + `WEBHOOK_REQUIRE_AUTH=true` recomendado: webhook de instância não registrada é rejeitado com 401. |
 | Confirmação de envio | Toda tool destrutiva (`send`, `send_voice`, `send_image`, `schedule`, `edit_message`, `delete_message`, `zapi_action` de envio) exige `confirmed:true` numa **segunda** chamada — a primeira devolve o preview e bloqueia. |
-| **Voice gate** (0055) | `wa_instance.voice_gate` = `off` \| `warn` (default) \| `block`. Em `block`, envio com violação `severity: high` do voice guide é **recusado server-side** a menos que venha `confirmed_voice:true` (aprovação explícita do dono para o texto exato). Cobre as 5 tools de envio **e** as actions de texto do `zapi_action`. |
+| **Voice gate** (0055/0058) | `wa_instance.voice_gate` = `off` \| `warn` (default) \| `block`. Em `block`, envio com violação `severity: high` do voice guide é **recusado server-side**; o contrato é o agente **corrigir o texto e reenviar até passar**. Única exceção: `confirmed_voice:true` (dono aprovou o texto exato no chat). Cobre as 5 tools de envio **e** as actions de envio do `zapi_action` (texto, poll, forward, edição e mídia com caption). |
 | Anti-atropelo | Gate de *inbound recente*: se o contato mandou mensagem há <10 min e não foi respondida, o `send` bloqueia (`force_send_after_inbound` destrava conscientemente). |
-| Auditoria | `wa_action_log` (toda action do `wa-proxy`, com `agent_name` + `agent_request_id`) e `messages.sent_by_agent`/`agent_name` — dá pra responder "qual agente enviou o quê, quando". |
+| Auditoria | `wa_action_log` (toda action do `wa-proxy`, com `agent_name` + `agent_request_id`), `messages.sent_by_agent`/`agent_name`, `voice_bypass_log` (0056: todo envio liberado por `confirmed_voice` em gate `block`) e `voice_block_log` (0058: toda recusa do gate; 3+ no mesmo chat em 15 min + Expert Brain conectado = task de calibração do voice guide no board do dono). |
 | Massa | O MCP **não tem tool batch** por design: 1 chamada = 1 chat. |
 
 ## 2. Limitações reconhecidas (NÃO mitigado)
 
-- **`confirmed:true` e `confirmed_voice:true` são cooperativos, não adversariais.** O mesmo LLM que redige decide setar as flags. Prompt injection (ex.: mensagem/áudio malicioso lido do próprio WhatsApp) pode setar as duas sem confirmação humana real. Gate humano de verdade requer confirmação out-of-band (backlog §3). Nas máquinas do dono, um hook local bloqueante (fora deste repo) reduz o risco; superfícies OAuth dependem do voice gate + confirmação cooperativa.
+- **`confirmed:true` e `confirmed_voice:true` são cooperativos, não adversariais.** O mesmo LLM que redige decide setar as flags. Prompt injection (ex.: mensagem/áudio malicioso lido do próprio WhatsApp) pode setar as duas sem confirmação humana real. A confirmação out-of-band (retenção + card + PIN) foi **construída, testada e descartada** em 19/07/2026 como decisão de produto (migrations 0057→0058): humano no caminho da mensagem individual não entra no modelo. Mitigação adotada: **detecção auditada** (`voice_bypass_log` registra 100% dos usos de `confirmed_voice` em gate `block`; `voice_block_log` registra toda recusa) em vez de prevenção. Nas máquinas do dono, um hook local bloqueante (fora deste repo) reduz o risco; superfícies OAuth dependem do voice gate + confirmação cooperativa.
 - **Caller com `service_role` bypassa tudo**: quem tem a key do projeto chama `send-message` direto. A key nunca sai do ambiente das functions/CI — vazou, rotacione (runbook §4).
 - **Rate limit é básico** (por chat/minuto no caminho de envio) — um loop lento e distribuído entre chats ainda passa. WhatsApp bane números por volume repetitivo; monitore `messages` por picos.
 
@@ -29,7 +29,7 @@ Não existe mais processo MCP local: o runtime inteiro são **Edge Functions no 
 | Prioridade | Item | Status |
 |-----------|------|--------|
 | P0 | Rotação periódica de credenciais (`service_role`, `MCP_API_KEY`, tokens do provider) | Processo manual |
-| P1 | Confirmação out-of-band (2FA via canal separado antes de `send` de risco) | Backlog |
+| ~~P1~~ | ~~Confirmação out-of-band (2FA via canal separado antes de `send` de risco)~~ | **Descartado (19/07/2026)** — construído e testado (0057), removido por decisão de produto (0058); risco residual aceito com detecção via `voice_bypass_log`/`voice_block_log` (ver §2) |
 | P2 | Whitelist por contato (envia sem pedir) + blacklist (sempre confirmar) | Backlog |
 | P3 | Kill switch global de outbound (freeze) por tool dedicada | Parcial: `UPDATE wa_instance SET is_active=false` já derruba o envio |
 

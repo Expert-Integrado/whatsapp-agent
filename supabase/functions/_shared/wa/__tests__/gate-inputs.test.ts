@@ -45,3 +45,19 @@ Deno.test("defaultGateInstance: chave resolvida vence; senao is_default; senao p
   assertEquals(defaultGateInstance([{ instance_id: "A" }], null), "A");
   assertEquals(defaultGateInstance([], null), null);
 });
+
+// Revisao 19/07: envio FRESCO de midia via zapi_action tem caption livre — sem
+// estas actions no set, saia sem confirmacao e sem gate (o wa-proxy allowlista
+// as tres e nada exige o campo edit*MessageId).
+Deno.test("ZAPI_SEND_ACTIONS: send-image/send-video/send-document passam pelo gate", () => {
+  for (const a of ["send-image", "send-video", "send-document"]) {
+    assertEquals(ZAPI_SEND_ACTIONS.has(a), true, a);
+  }
+});
+
+Deno.test("scheduleGateTexts: link.title e link.description entram no gate", () => {
+  const texts = scheduleGateTexts([
+    { type: "text", content: "limpo", link: { url: "https://x", title: "me chama no zapx", description: "desc" } },
+  ]);
+  assertEquals(texts.filter((t) => typeof t === "string"), ["limpo", "me chama no zapx", "desc"]);
+});
