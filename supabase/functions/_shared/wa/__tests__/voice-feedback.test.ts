@@ -12,8 +12,12 @@ Deno.test("dedupe key: estavel por instancia+chat+dia (nao spamma o board)", () 
   const a = feedbackDedupeKey("INST1", "5511999", "2026-07-19");
   const b = feedbackDedupeKey("INST1", "5511999", "2026-07-19");
   const c = feedbackDedupeKey("INST1", "5511999", "2026-07-20");
+  const d = feedbackDedupeKey("INST2", "5511999", "2026-07-19"); // outra instancia
+  const e = feedbackDedupeKey("INST1", "5511000", "2026-07-19"); // outro chat
   assertEquals(a, b);
-  assertEquals(a === c, false);
+  assertEquals(a === c, false); // difere por DIA
+  assertEquals(a === d, false); // difere por INSTANCIA (dois donos, mesmo chat/dia = cards distintos)
+  assertEquals(a === e, false); // difere por CHAT
   assertEquals(a.length <= 120, true);
 });
 
