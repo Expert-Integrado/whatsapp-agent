@@ -15,6 +15,7 @@ import { evaluateVoiceGate, type VoiceGateMode, type VoiceViolation } from "../_
 import { ZAPI_SEND_ACTIONS, zapiGateTexts, scheduleGateTexts, defaultGateInstance } from "../_shared/wa/gate-inputs.ts";
 import { feedbackDedupeKey, shouldOpenFeedbackTask, voiceFeedbackMarkdown } from "../_shared/wa/voice-feedback.ts";
 import { brainSaveTask } from "../_shared/wa/brain-client.ts";
+import { normalizeForVoiceCheck } from "../_shared/wa/voice-normalize.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -524,9 +525,13 @@ function compileCustomRules(checks: any): { id: string; pattern: RegExp; severit
 }
 function checkVoiceViolations(content: string, customRules: { id: string; pattern: RegExp; severity: string; message: string }[] = []) {
   if (!content || typeof content !== "string") return [];
+  // Cotejo normalizado (NFC + strip zero-width + fold de traco): fecha o bypass
+  // por Unicode que renderiza igual mas escapa da regex crua. O texto ENVIADO
+  // segue intacto — so a copia inspecionada aqui muda.
+  const probe = normalizeForVoiceCheck(content);
   const out: any[] = [];
   for (const rule of [...HARD_RULES, ...customRules]) {
-    const m = content.match(rule.pattern);
+    const m = probe.match(rule.pattern);
     if (m) out.push({ id: rule.id, severity: rule.severity, message: rule.message, match: m[0] });
   }
   return out;
@@ -1193,9 +1198,9 @@ async function dispatchAction(action: string, params: any = {}): Promise<Respons
           ...(media_url && { media_url }), ...(file_name && { file_name }), ...(quotedId && { quoted_msg_id: quotedId }),
           ...(effectiveDelayTyping !== undefined && { delay_typing: effectiveDelayTyping }), ...(delay_message !== undefined && { delay_message }),
           ...(mentions?.length && { mentions }), ...(mentions_everyone && { mentions_everyone: true }) };
-        // link.title/description renderizam como texto visivel no card de preview
-        // — entram no gate junto do content (achado da revisao 19/07).
-        const vg = await runVoiceGate([content, link?.title, link?.description], targetInstance, params, "send", resolved.chat_id);
+        // link.title/description (card de preview) e file_name (rotulo do documento)
+        // renderizam como texto visivel — entram no gate junto do content (censo 19/07).
+        const vg = await runVoiceGate([content, link?.title, link?.description, file_name], targetInstance, params, "send", resolved.chat_id);
         if (vg.block) return vg.block;
         const { status, data } = await callEdge("send-message", sendBody);
         if (status >= 400) return json({ ok: false, error: data?.error || `send-message ${status}`, detail: data }, status);

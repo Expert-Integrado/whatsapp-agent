@@ -8,9 +8,9 @@ Deno.test("ZAPI_SEND_ACTIONS cobre as 6 actions de envio", () => {
   assertEquals(ZAPI_SEND_ACTIONS.has("get-chats"), false);
 });
 
-Deno.test("zapiGateTexts: coleta message/body/text/caption e options[]", () => {
+Deno.test("zapiGateTexts: coleta os campos de texto-que-sai, ignora o resto", () => {
   const texts = zapiGateTexts({ phone: "5511", message: "m", body: "b", text: "t", caption: "c", options: ["o1", "o2"] });
-  assertEquals(texts, ["m", "b", "t", "c", "o1", "o2"]);
+  assertEquals(texts.filter((t) => typeof t === "string"), ["m", "b", "t", "c", "o1", "o2"]);
 });
 
 Deno.test("zapiGateTexts: campos ausentes viram undefined (o gate filtra), options nao-array ignorado", () => {
@@ -60,4 +60,31 @@ Deno.test("scheduleGateTexts: link.title e link.description entram no gate", () 
     { type: "text", content: "limpo", link: { url: "https://x", title: "me chama no zapx", description: "desc" } },
   ]);
   assertEquals(texts.filter((t) => typeof t === "string"), ["limpo", "me chama no zapx", "desc"]);
+});
+
+// Censo 19/07: furos de texto-que-sai que escapavam do gate.
+Deno.test("zapiGateTexts: fileName/file_name de documento entram no gate", () => {
+  const a = zapiGateTexts({ caption: "segue", fileName: "Ola-proposta.pdf" });
+  const b = zapiGateTexts({ caption: "segue", file_name: "corre-que-e-so-hoje.pdf" });
+  assertEquals(a.includes("Ola-proposta.pdf"), true);
+  assertEquals(b.includes("corre-que-e-so-hoje.pdf"), true);
+});
+
+Deno.test("zapiGateTexts: opcoes de enquete no shape nativo Z-API (poll:[{name}]) entram no gate", () => {
+  const texts = zapiGateTexts({ message: "Escolhe", poll: [{ name: "corre que e so hoje" }, { name: "opcao b" }] });
+  assertEquals(texts.includes("corre que e so hoje"), true);
+  assertEquals(texts.includes("opcao b"), true);
+});
+
+Deno.test("zapiGateTexts: groupName (assunto de grupo) entra no gate", () => {
+  assertEquals(zapiGateTexts({ groupName: "Ola pessoal" }).includes("Ola pessoal"), true);
+});
+
+Deno.test("ZAPI_SEND_ACTIONS: create-group passa pelo gate/confirmacao", () => {
+  assertEquals(ZAPI_SEND_ACTIONS.has("create-group"), true);
+});
+
+Deno.test("scheduleGateTexts: file_name de documento agendado entra no gate", () => {
+  const texts = scheduleGateTexts([{ type: "document", media_url: "http://x", file_name: "Ola-doc.pdf" }]);
+  assertEquals(texts.includes("Ola-doc.pdf"), true);
 });

@@ -1,0 +1,6 @@
+{
+  "tasks": {
+    "test": "deno test --allow-read supabase/functions/_shared/wa/",
+    "test:gate": "deno test --allow-read supabase/functions/_shared/wa/__tests__/gate-coverage-guard.test.ts"
+  }
+}
