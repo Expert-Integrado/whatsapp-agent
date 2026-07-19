@@ -117,11 +117,40 @@ Deno.test("approval: violacao medium nao retem", () => {
   assertEquals(r.retain, false);
 });
 
-Deno.test("retain e false nos modos off/warn/block", () => {
+Deno.test("retain e false nos modos off/warn/block (sem request_approval)", () => {
   for (const gate of ["off", "warn", "block"] as const) {
     const r = evaluateVoiceGate({ texts: ["zapx"], gate, confirmedVoice: false, violationsFor });
     assertEquals(r.retain, false, gate);
   }
+});
+
+// Fluxo PONTUAL (decisao do dono 19/07): em block, o padrao e o agente corrigir o
+// texto e reenviar; request_approval retem pro card SO quando o texto precisa
+// sair exatamente como esta e o dono vai decidir pelo board.
+Deno.test("block + request_approval + violacao high: retem (nao bloqueia, nao bypassa)", () => {
+  const r = evaluateVoiceGate({ texts: ["zapx"], gate: "block", confirmedVoice: false, requestApproval: true, violationsFor });
+  assertEquals(r.retain, true);
+  assertEquals(r.blocked, false);
+  assertEquals(r.bypassed, false);
+});
+
+Deno.test("block + request_approval em texto limpo: envia normal, sem retencao", () => {
+  const r = evaluateVoiceGate({ texts: ["beleza, seguimos"], gate: "block", confirmedVoice: false, requestApproval: true, violationsFor });
+  assertEquals(r.retain, false);
+  assertEquals(r.blocked, false);
+});
+
+Deno.test("warn/off ignoram request_approval (nada seria barrado)", () => {
+  for (const gate of ["off", "warn"] as const) {
+    const r = evaluateVoiceGate({ texts: ["zapx"], gate, confirmedVoice: false, requestApproval: true, violationsFor });
+    assertEquals(r.retain, false, gate);
+  }
+});
+
+Deno.test("block + request_approval + confirmed_voice juntos: retencao vence (card decide)", () => {
+  const r = evaluateVoiceGate({ texts: ["zapx"], gate: "block", confirmedVoice: true, requestApproval: true, violationsFor });
+  assertEquals(r.retain, true);
+  assertEquals(r.bypassed, false);
 });
 
 Deno.test("gate desconhecido cai no default warn (fail-safe, nao bloqueia)", () => {

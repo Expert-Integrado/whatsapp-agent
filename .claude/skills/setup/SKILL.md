@@ -311,7 +311,7 @@ Na sequência do voice guide, pergunte (AskUserQuestion):
 
 > "Quando eu redigir algo em seu nome que viole uma regra grave do seu estilo, o que o servidor deve fazer?"
 > - **Avisar e enviar (recomendado pra começar):** o envio sai e volta com o aviso da violação junto (`warn` — é o padrão).
-> - **Bloquear até você aprovar:** o servidor RECUSA o envio até você ver a violação e aprovar o texto exato (`block` — recomendado pra quem instalou o guide e deixa o agente responder sozinho).
+> - **Bloquear até corrigir:** o servidor RECUSA o envio; o agente corrige o texto e reenvia sozinho (`block` — recomendado pra quem instalou o guide e deixa o agente responder sozinho). Pontualmente, se o texto precisar sair exatamente como está, o agente pode reter pra sua aprovação por clique + PIN (`request_approval`).
 > - **Reter pra aprovação por clique + PIN:** a mensagem fica RETIDA no servidor e só sai quando você clicar em Aprovar e digitar seu PIN numa página — nem o agente consegue liberar (`approval`, migration 0057; o mais seguro, exige o Expert Brain conectado pro card de aprovação e o secret `EXPERT_BRAIN_PAT`).
 > - **Desligar:** nenhuma checagem no servidor (`off`).
 

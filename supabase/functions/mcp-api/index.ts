@@ -657,10 +657,11 @@ async function runVoiceGate(texts: (string | null | undefined)[], instanceId: st
   const g = await loadVoiceGuide(instanceId ?? null);
   const customRules = compileCustomRules(g?.checks);
   const r = evaluateVoiceGate({ texts, gate, confirmedVoice: params?.confirmed_voice === true,
+    requestApproval: params?.request_approval === true,
     violationsFor: (t) => checkVoiceViolations(t, customRules) });
   if (r.blocked) {
     return { block: json({ ok: false, blocked: true, reason: "voice_gate", violations: r.violations,
-      instruction: "Envio recusado (voice_gate=block): o texto viola regra HARD do voice guide da instancia. Corrija o texto e reenvie. Se o dono ja aprovou o texto exatamente como esta, reenvie com confirmed_voice:true." }) };
+      instruction: "Envio recusado (voice_gate=block): o texto viola regra HARD do voice guide da instancia. CORRIJA o texto (remova a violacao mantendo o sentido) e reenvie — este e o caminho padrao. Se o dono ja aprovou o texto exatamente como esta, reenvie com confirmed_voice:true; se o texto PRECISA sair como esta e o dono vai decidir depois pelo board, reenvie com request_approval:true (retem e cria card de aprovacao)." }) };
   }
   // Modo approval (0057): o case chama retainForApproval com o payload de replay —
   // aqui so a decisao (confirmed_voice NAO bypassa nesse modo, por design).
@@ -1892,6 +1893,7 @@ const TOOL_SCHEMAS = [
         reply_to: { type: "string", description: "Mensagem a citar (quote): 'last' | 'last_received' | 'last_sent' (posicional, dispensa read) ou UUID de read/search" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true para enviar; so apos o usuario confirmar" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o texto exato apos ver as violacoes — nunca por iniciativa propria" },
+        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
         allow_new: { type: "boolean", description: "Permite enviar pra numero novo (primeiro contato); exige instance" },
         humanize: { type: "boolean", description: "Calcula delay_typing automatico por tamanho/tipo (default true)" },
         delay_typing: { type: "number", description: "Override do delay de digitacao (0-15s)" },
@@ -1935,6 +1937,7 @@ const TOOL_SCHEMAS = [
         speed: { type: "number", description: "0.7-1.2 (default 0.95; ignorado com profile)" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o texto exato apos ver as violacoes — nunca por iniciativa propria" },
+        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
       },
       required: ["to", "text"],
@@ -1952,6 +1955,7 @@ const TOOL_SCHEMAS = [
         caption: { type: "string", description: "Legenda da imagem (opcional)" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao explicita" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente a legenda exata apos ver as violacoes — nunca por iniciativa propria" },
+        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
         instance: { type: "string", description: "De qual numero enviar (alias ou instance_id)" },
       },
       required: ["to", "image_base64"],
@@ -2086,6 +2090,7 @@ const TOOL_SCHEMAS = [
         instance: { type: "string", description: "Com chat: instancia quando o chat existe nas duas" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos confirmacao" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o novo texto exato apos ver as violacoes — nunca por iniciativa propria" },
+        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
       },
       required: ["new_content"],
       additionalProperties: false,
@@ -2129,6 +2134,7 @@ const TOOL_SCHEMAS = [
         params: { type: "object", description: "Parametros da action", additionalProperties: true },
         confirmed: { type: "boolean", description: "Obrigatorio true para actions de envio" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente o texto exato apos ver as violacoes — nunca por iniciativa propria" },
+        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
         instance: { type: "string", description: "De qual numero (alias ou instance_id)" },
       },
       required: ["action", "params"],
@@ -2234,6 +2240,7 @@ const TOOL_SCHEMAS = [
         instance: { type: "string", description: "Instancia (alias ou instance_id); default: herda a do chat" },
         confirmed: { type: "boolean", description: "OBRIGATORIO true; so apos o usuario confirmar o resumo do agendamento" },
         confirmed_voice: { type: "boolean", description: "Bypassa o voice gate (instancias em modo block). SO quando o dono aprovou explicitamente os textos exatos apos ver as violacoes — nunca por iniciativa propria" },
+        request_approval: { type: "boolean", description: "Uso PONTUAL: em vez de corrigir o texto, retem o envio pra aprovacao do dono via card no board do Brain (clique + PIN). So quando o texto precisa sair exatamente como esta e o dono decidiu revisar depois — nunca por iniciativa propria" },
       },
       required: ["to", "at", "items"],
       additionalProperties: false,

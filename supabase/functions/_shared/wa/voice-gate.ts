@@ -17,9 +17,10 @@ export function evaluateVoiceGate(input: {
   texts: (string | null | undefined)[];
   gate: VoiceGateMode;
   confirmedVoice: boolean;
+  requestApproval?: boolean;
   violationsFor: (text: string) => VoiceViolation[];
 }): { blocked: boolean; violations: VoiceViolation[]; bypassed: boolean; retain: boolean } {
-  const { texts, gate, confirmedVoice, violationsFor } = input;
+  const { texts, gate, confirmedVoice, requestApproval = false, violationsFor } = input;
   if (gate === "off") return { blocked: false, violations: [], bypassed: false, retain: false };
   const strings = texts.filter((t): t is string => typeof t === "string" && t.trim().length > 0);
   const seen = new Set<string>();
@@ -29,11 +30,14 @@ export function evaluateVoiceGate(input: {
       if (v.severity === "high" && !seen.has(v.id)) { seen.add(v.id); violations.push(v); }
     }
   }
-  const blocked = gate === "block" && violations.length > 0 && !confirmedVoice;
+  // retain = aprovacao out-of-band (card no Brain + PIN): sempre no modo
+  // 'approval'; PONTUAL no modo 'block' quando o caller pede request_approval
+  // (decisao do dono 19/07: o padrao e o agente corrigir o texto e reenviar
+  // sozinho; o card e ferramenta pontual, nao o fluxo de todo dia).
+  const retain = violations.length > 0 && (gate === "approval" || (gate === "block" && requestApproval));
+  const blocked = gate === "block" && violations.length > 0 && !confirmedVoice && !retain;
   // bypassed = envio que SO passou porque o caller trouxe confirmed_voice num gate
   // block com violacao high — e o evento que a trilha de auditoria registra.
-  const bypassed = gate === "block" && violations.length > 0 && confirmedVoice;
-  // retain = modo approval com violacao high: reter pra aprovacao out-of-band.
-  const retain = gate === "approval" && violations.length > 0;
+  const bypassed = gate === "block" && violations.length > 0 && confirmedVoice && !retain;
   return { blocked, violations, bypassed, retain };
 }
