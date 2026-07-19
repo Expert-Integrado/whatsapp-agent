@@ -312,12 +312,13 @@ Na sequência do voice guide, pergunte (AskUserQuestion):
 > "Quando eu redigir algo em seu nome que viole uma regra grave do seu estilo, o que o servidor deve fazer?"
 > - **Avisar e enviar (recomendado pra começar):** o envio sai e volta com o aviso da violação junto (`warn` — é o padrão).
 > - **Bloquear até você aprovar:** o servidor RECUSA o envio até você ver a violação e aprovar o texto exato (`block` — recomendado pra quem instalou o guide e deixa o agente responder sozinho).
+> - **Reter pra aprovação por clique + PIN:** a mensagem fica RETIDA no servidor e só sai quando você clicar em Aprovar e digitar seu PIN numa página — nem o agente consegue liberar (`approval`, migration 0057; o mais seguro, exige o Expert Brain conectado pro card de aprovação e o secret `EXPERT_BRAIN_PAT`).
 > - **Desligar:** nenhuma checagem no servidor (`off`).
 
 Aplique a escolha (só é preciso rodar se NÃO for `warn`, que é o default da migration 0055):
 
 ```bash
-SQL="UPDATE wa_instance SET voice_gate = '<off|warn|block>' WHERE instance_id = '<INSTANCE_ID>';"
+SQL="UPDATE wa_instance SET voice_gate = '<off|warn|block|approval>' WHERE instance_id = '<INSTANCE_ID>';"
 curl -s -X POST "https://api.supabase.com/v1/projects/<SUPABASE_PROJECT_REF>/database/query" \
   -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
   -d "{\"query\": \"$(echo "$SQL" | tr '\n' ' ')\"}"

@@ -185,6 +185,9 @@ Origem: [0049](../../supabase/migrations/0049_scheduled_sequences.sql). Uma linh
 ### `voice_bypass_log` — trilha de bypasses do voice gate
 Origem: [0056](../../supabase/migrations/0056_voice_bypass_log.sql). Log **silencioso** de auditoria: uma linha por envio que só passou porque o caller trouxe `confirmed_voice:true` numa instância em `voice_gate='block'` com violação `severity: high`. Grava `instance_id`, `tool` (ex.: `send`, `zapi_action:send-text`), `rule_ids` (regras violadas) e `text_preview` (até 1000 chars). Escrita só pela `mcp-api` (service_role; RLS ligada sem policies); nenhuma notificação — consulta sob demanda quando o dono quiser investigar. Falha no insert nunca derruba o envio (já aprovado pelo dono).
 
+### `voice_pending_approval` + `voice_approval_pin` — aprovação out-of-band do gate
+Origem: [0057](../../supabase/migrations/0057_voice_pending_approval.sql). Modo `voice_gate='approval'`: envio com violação `high` é RETIDO (`voice_pending_approval`: payload de replay autossuficiente, violações, `token_hash` SHA-256, `brain_task_id`, status `pending|approved|rejected|expired|failed`, `pin_attempts`) e vira card no Brain com links Aprovar/Recusar; `confirmed_voice` NÃO bypassa nesse modo. O clique do dono abre a página pública do `mcp-api` (`GET/POST ?approval=<id>.<token>`), que exige o **PIN do dono** (`voice_approval_pin`, linha única, hash; definido no primeiro uso, 5 tentativas por retenção) antes de re-executar o envio. RLS ligada sem policies nas duas.
+
 ### Tabelas removidas
 - `presence_events` — removida em [0022](../../supabase/migrations/0022_drop_presence_events.sql) (≈216 MB de dado morto + cron de limpeza).
 - `contacts` e `oauth_tokens` — removidas em [0023](../../supabase/migrations/0023_remove_google_contacts_sync.sql) (sync do Google Contacts nunca foi populado). O CASCADE quebrou views, recriadas em [0024](../../supabase/migrations/0024_recreate_v_chats_with_contact.sql)/[0026](../../supabase/migrations/0026_recreate_v_messages_with_sender.sql).
@@ -321,6 +324,7 @@ Todos rodam em **UTC**. Os que chamam Edge Functions usam `call_edge_function` +
 | 0054 | `lid_contact_name_fallback` | Fallback de nome de contato para chats `@lid` sem nome resolvido |
 | 0055 | `instance_voice_gate` | `wa_instance.voice_gate` (`off`/`warn`/`block`, default `warn`): gate de voz server-side no `mcp-api` — última linha de defesa para superfícies sem hook local |
 | 0056 | `voice_bypass_log` | Tabela `voice_bypass_log`: trilha silenciosa de auditoria dos envios liberados com `confirmed_voice:true` em gate `block` (instância, tool, regras, preview do texto) |
+| 0057 | `voice_pending_approval` | Modo `voice_gate='approval'` (aprovação out-of-band): tabelas `voice_pending_approval` (envio retido + token hasheado + card no Brain) e `voice_approval_pin` (PIN do dono, TOFU) — `confirmed_voice` não bypassa |
 
 ---
 
