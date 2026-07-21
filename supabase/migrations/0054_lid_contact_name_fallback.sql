@@ -11,6 +11,12 @@
 -- chat_name for nulo/lixo (@lid cru ou so digitos). scoreNameMatch (resolveChat
 -- e search chat_name) ja usa contact_name — ganha o fallback de graca, sem
 -- mexer em mcp-api/index.ts.
+--
+-- CORRECAO (bug de instalacao): a 0045 anexou resolved_at/snooze_until/
+-- waiting_on_effective no fim desta view. CREATE OR REPLACE VIEW no Postgres nao
+-- remove colunas de view existente — a versao anterior desta migration parava em
+-- business_description e quebrava a instalacao com "cannot drop columns from view".
+-- Estas 3 colunas voltam no fim, na MESMA ordem da 0045, sem mexer na logica nova.
 
 BEGIN;
 
@@ -27,7 +33,16 @@ SELECT c.chat_id, c.chat_name, c.is_group, c.is_community, c.is_announcement,
        NULL::text AS contact_given, NULL::text AS contact_photo, NULL::text[] AS contact_emails,
        c.waiting_on,
        c.contact_about,
-       (c.business_profile ->> 'description') AS business_description
+       (c.business_profile ->> 'description') AS business_description,
+       c.resolved_at,
+       c.snooze_until,
+       CASE
+         WHEN c.waiting_on = 'me' AND c.resolved_at IS NOT NULL
+              AND (c.last_received_at IS NULL OR c.last_received_at <= c.resolved_at)
+              AND (c.snooze_until IS NULL OR now() < c.snooze_until)
+         THEN 'resolved'
+         ELSE c.waiting_on
+       END AS waiting_on_effective
 FROM public.chats c
 LEFT JOIN LATERAL (
   SELECT m.sender_name
