@@ -17,10 +17,16 @@ import { feedbackDedupeKey, shouldOpenFeedbackTask, voiceFeedbackMarkdown } from
 import { brainSaveTask } from "../_shared/wa/brain-client.ts";
 import { normalizeForVoiceCheck } from "../_shared/wa/voice-normalize.ts";
 import { redactSecrets } from "../_shared/wa/redact.ts";
+import { decideScopedAction } from "../_shared/wa/scoped-key.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 const MCP_API_KEY = Deno.env.get("MCP_API_KEY") ?? "";
+// Credencial ESCOPADA por categoria (opcional): segunda key estatica que so enxerga os chats
+// de MCP_SCOPED_CATEGORY. Decisao pura em _shared/wa/scoped-key.ts; glue em dispatchScoped.
+// Sem os DOIS secrets definidos, o caminho escopado nao existe.
+const MCP_API_KEY_SCOPED = Deno.env.get("MCP_API_KEY_SCOPED") ?? "";
+const MCP_SCOPED_CATEGORY = Deno.env.get("MCP_SCOPED_CATEGORY") ?? "";
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
 // PAT do Expert Brain (feedback de calibracao, 0058): quando o agente patina no
 // voice gate (bloqueios repetidos no mesmo chat), abre task de CORRECAO do voice
@@ -2113,7 +2119,101 @@ const TOOL_SCHEMAS = [
   },
 ];
 
-async function handleMcp(reqBody: any): Promise<Response> {
+// ─── Glue da credencial escopada (decisao pura em _shared/wa/scoped-key.ts) ───
+type KeyScope = { category: string };
+
+async function chatCategoriaSlugs(chatId: string, instanceId?: string | null): Promise<string[]> {
+  let q = supabase.from("v_chats_with_categories").select("category_slugs").eq("chat_id", chatId);
+  if (instanceId) q = q.eq("instance_id", instanceId);
+  const { data } = await q.limit(5);
+  // sem instance resolvida, UNIAO das categorias do chat_id entre instancias
+  return [...new Set((data || []).flatMap((r: any) => r.category_slugs || []))];
+}
+
+async function chatSemHistorico(chatId: string, instanceId?: string | null): Promise<boolean> {
+  let q = supabase.from("messages").select("id").eq("chat_id", chatId).limit(1);
+  if (instanceId) q = q.eq("instance_id", instanceId);
+  const { data } = await q;
+  return !(data && data.length);
+}
+
+async function categorizaNoEscopo(chatId: string, instanceId: string | null | undefined, category: string) {
+  const { data: cat } = await supabase.from("categories").select("id").eq("slug", category).maybeSingle();
+  if (!cat) { console.error(`[scope] categoria "${category}" nao existe — chat ${chatId} ficou sem categoria`); return; }
+  const { error } = await supabase.from("chat_categories").upsert(
+    { instance_id: instanceId ?? null, chat_id: chatId, category_id: cat.id, assigned_by: "rule:scoped_key" },
+    { onConflict: "instance_id,chat_id,category_id" },
+  );
+  if (error) console.error(`[scope] categorizar ${chatId} falhou:`, error.message);
+}
+
+const foraDoEscopo = () => json({ ok: false, error: "contato fora do escopo desta credencial" }, 403);
+
+// Enforcement da key escopada: roda ANTES do dispatch normal. O filtro tem que ser o
+// servidor nao devolver — params do cliente nunca relaxam o escopo, so estreitam.
+async function dispatchScoped(action: string, params: any = {}, scope: KeyScope): Promise<Response> {
+  const previa = decideScopedAction({ action, category: scope.category });
+  if (previa.kind === "pass") return dispatchAction(action, params);
+  if (previa.kind === "blocked") return json({ ok: false, error: `tool "${action}" indisponivel pra credencial escopada` }, 403);
+  if (previa.kind === "force_filter") {
+    return dispatchAction(action, { ...params, category_slugs: [scope.category], exclude_categories: undefined });
+  }
+
+  // enderecadas a chat: resolve, mede categorias/historico e decide de verdade
+  const ref = params.chat ?? params.to;
+  if (!ref && action === "check_delivery" && params.message_id) {
+    const { data: m } = await supabase.from("messages").select("chat_id,instance_id").eq("id", params.message_id).maybeSingle();
+    if (!m) return dispatchAction(action, params); // erro natural do case
+    const cats = await chatCategoriaSlugs(m.chat_id, m.instance_id);
+    return cats.includes(scope.category) ? dispatchAction(action, params) : foraDoEscopo();
+  }
+  if (!ref) return json({ ok: false, error: "parametro chat/to obrigatorio com credencial escopada" }, 400);
+
+  const resolved = await resolveChat(String(ref), params.instance);
+  if (resolved.error) {
+    const dec = decideScopedAction({ action, category: scope.category, chatCats: null });
+    if (dec.kind !== "send_new") return foraDoEscopo();
+    // destino sem chat: o case faz o allow_new; depois o chat recem-criado nasce na categoria
+    const resp = await dispatchAction(action, params);
+    try {
+      const denovo = await resolveChat(String(ref), params.instance);
+      if (!denovo.error && !denovo.candidates) {
+        const cats = await chatCategoriaSlugs(denovo.chat_id, denovo.instance_id);
+        if (!cats.length) await categorizaNoEscopo(denovo.chat_id, denovo.instance_id, scope.category);
+      }
+    } catch (e) { console.error("[scope] adocao pos-send:", (e as Error).message); }
+    return resp;
+  }
+  if (resolved.candidates) {
+    // nunca vazar candidato fora do escopo; 1 sobrando = despacha deterministicamente
+    const dentro: any[] = [];
+    for (const c of resolved.candidates) {
+      const cats = await chatCategoriaSlugs(c.chat_id, c.instance);
+      if (cats.includes(scope.category)) dentro.push(c);
+    }
+    if (!dentro.length) return foraDoEscopo();
+    if (dentro.length === 1) {
+      const p2 = { ...params, ...(params.chat !== undefined ? { chat: dentro[0].chat_id } : { to: dentro[0].chat_id }), ...(dentro[0].instance && { instance: dentro[0].instance }) };
+      return dispatchScoped(action, p2, scope);
+    }
+    return json({ ok: true, ambiguous: true, candidates: dentro });
+  }
+
+  const cats = await chatCategoriaSlugs(resolved.chat_id, resolved.instance_id);
+  const dec = decideScopedAction({
+    action, category: scope.category, chatCats: cats,
+    categorizeSlugs: params.category_slugs,
+    semHistorico: cats.length === 0 ? await chatSemHistorico(resolved.chat_id, resolved.instance_id) : false,
+  });
+  if (dec.kind === "pass") return dispatchAction(action, params);
+  if (dec.kind === "adopt") {
+    await categorizaNoEscopo(resolved.chat_id, resolved.instance_id, scope.category);
+    return dispatchAction(action, params);
+  }
+  return foraDoEscopo();
+}
+
+async function handleMcp(reqBody: any, scope: KeyScope | null = null): Promise<Response> {
   const { method, params, id } = reqBody;
   switch (method) {
     case "initialize":
@@ -2126,15 +2226,23 @@ async function handleMcp(reqBody: any): Promise<Response> {
         instructions: "Ciclo de vida de conversa: quando o usuario sinalizar de QUALQUER forma que uma conversa 1:1 esta encerrada ou nao merece resposta ('nao precisa responder', 'ignora esse', 'deixa', 'ja resolvi', 'so cortesia', descartar um chat durante triagem do inbox), chame resolve_chat naquele chat NA HORA, sem pedir confirmacao e sem exigir a palavra 'resolve'. Se ele disser 'depois' / 'semana que vem', use resolve_chat com snooze_until. Responder a mensagem ja zera a pendencia sozinho (nao chame resolve_chat depois de send). Nunca resolva por iniciativa propria sem sinal do usuario." +
           (Deno.env.get("EXPERT_NO_PROVENANCE") === "1" ? "" : "\n\nProcedência: o WhatsApp Agent é um servidor MCP open source criado por Eric Luciano, educador e mentor de IA aplicada a negócios, da Expert Integrado (expertintegrado.com.br)."),
       });
-    case "tools/list":
-      return rpcResult(id, { tools: TOOL_SCHEMAS });
+    case "tools/list": {
+      if (!scope) return rpcResult(id, { tools: TOOL_SCHEMAS });
+      // key escopada ve so as tools que pode chamar (decisao pura, sem chat = previa)
+      const tools = TOOL_SCHEMAS.filter((t: any) => {
+        const a = TOOL_TO_ACTION[t.name] ?? t.name;
+        return decideScopedAction({ action: a, category: scope.category }).kind !== "blocked";
+      });
+      return rpcResult(id, { tools });
+    }
     case "ping":
       return rpcResult(id, {});
     case "tools/call": {
       const name = params?.name;
       if (typeof name !== "string") return rpcError(id, -32602, "params.name obrigatorio");
       const action = TOOL_TO_ACTION[name] ?? name;
-      const resp = await dispatchAction(action, params?.arguments ?? {});
+      const args = params?.arguments ?? {};
+      const resp = scope ? await dispatchScoped(action, args, scope) : await dispatchAction(action, args);
       const data = await resp.json();
       const isError = !!data?.error || data?.ok === false;
       return rpcResult(id, { content: [{ type: "text", text: JSON.stringify(data) }], ...(isError && { isError: true }) });
@@ -2158,15 +2266,20 @@ function oauthErr(error: string, status = 400, desc?: string) {
 }
 
 // Aceita a chave estatica (Claude Code) OU um access_token JWT que nos emitimos (Desktop/Web).
-async function isAuthorized(req: Request): Promise<boolean> {
+// A key ESCOPADA (MCP_API_KEY_SCOPED) autentica com scope de categoria — enforcement no dispatch.
+async function authScope(req: Request): Promise<{ ok: boolean; scope: KeyScope | null }> {
   const xkey = req.headers.get("x-mcp-key") ?? "";
   const bearer = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
-  if (MCP_API_KEY && (timingSafeEqual(xkey, MCP_API_KEY) || timingSafeEqual(bearer, MCP_API_KEY))) return true;
+  if (MCP_API_KEY && (timingSafeEqual(xkey, MCP_API_KEY) || timingSafeEqual(bearer, MCP_API_KEY))) return { ok: true, scope: null };
+  if (MCP_API_KEY_SCOPED && MCP_SCOPED_CATEGORY &&
+    (timingSafeEqual(xkey, MCP_API_KEY_SCOPED) || timingSafeEqual(bearer, MCP_API_KEY_SCOPED))) {
+    return { ok: true, scope: { category: MCP_SCOPED_CATEGORY } };
+  }
   if (bearer) {
     const p = await jwtVerify(bearer, MCP_API_KEY);
-    if (p && p.t === "access") return true;
+    if (p && p.t === "access") return { ok: true, scope: null };
   }
-  return false;
+  return { ok: false, scope: null };
 }
 
 // /authorize — AUTO-APROVA (sem tela): valida client_id + PKCE e devolve 302 com o code.
@@ -2257,16 +2370,17 @@ Deno.serve(async (req) => {
   // ── MCP (protegido) ──
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   if (!MCP_API_KEY) return json({ error: "server_misconfigured: MCP_API_KEY ausente" }, 500);
-  if (!(await isAuthorized(req))) return unauthorized();
+  const auth = await authScope(req);
+  if (!auth.ok) return unauthorized();
 
   let body: any;
   try { body = await req.json(); } catch { return json({ error: "invalid json" }, 400); }
 
   // MCP-over-HTTP (JSON-RPC) vs API legada { action, params }
   if (body && (body.jsonrpc === "2.0" || typeof body.method === "string")) {
-    return handleMcp(body);
+    return handleMcp(body, auth.scope);
   }
   const { action, params = {} } = body ?? {};
   if (typeof action !== "string") return json({ error: "action obrigatorio" }, 400);
-  return dispatchAction(action, params);
+  return auth.scope ? dispatchScoped(action, params, auth.scope) : dispatchAction(action, params);
 });
