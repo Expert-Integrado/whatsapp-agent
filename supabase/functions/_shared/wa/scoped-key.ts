@@ -27,6 +27,7 @@ export type ScopeDecision =
   | { kind: "force_filter" }  // inbox/search: forca category_slugs=[categoria]
   | { kind: "blocked" }       // tool indisponivel pra credencial escopada
   | { kind: "deny" }          // chat existe mas esta fora da categoria
+  | { kind: "deny_instance" } // chat existe mas esta em OUTRA instancia (fora do numero permitido)
   | { kind: "adopt" }         // chat sem categoria e sem historico: categoriza e despacha
   | { kind: "send_new" };     // destino ainda sem chat: despacha (allow_new) e adota depois
 
@@ -39,11 +40,20 @@ export function decideScopedAction(input: {
   categorizeSlugs?: string[];
   // true = chat resolvido mas sem nenhuma mensagem (conversa que esta nascendo)
   semHistorico?: boolean;
+  // TRAVA DE INSTANCIA (Eric 22/07): quando a key escopada tambem amarra um numero
+  // (MCP_SCOPED_INSTANCE), o agente so pode tocar chats DAQUELA instancia. Ambos ja resolvidos
+  // a instance_id pelo glue. scopedInstance ausente/null = sem trava de instancia (so categoria).
+  scopedInstance?: string | null;
+  // instance_id do chat resolvido (null quando o chat ainda nao existe — o glue forca a instancia no envio)
+  chatInstance?: string | null;
 }): ScopeDecision {
-  const { action, category, chatCats, categorizeSlugs, semHistorico } = input;
+  const { action, category, chatCats, categorizeSlugs, semHistorico, scopedInstance, chatInstance } = input;
   if (SCOPE_FREE.has(action)) return { kind: "pass" };
   if (action === "inbox" || action === "search") return { kind: "force_filter" };
   if (!SCOPE_CHAT_TOOLS.has(action)) return { kind: "blocked" };
+  // chat JA resolvido numa instancia diferente da permitida = fora do escopo, antes de olhar categoria
+  // (chat inexistente -> chatInstance null -> o glue forca params.instance=permitida no envio)
+  if (scopedInstance && chatInstance && chatInstance !== scopedInstance) return { kind: "deny_instance" };
 
   // destino sem chat: so a familia de envio segue (o case faz o allow_new e o chat nasce na categoria)
   if (chatCats == null) return SCOPE_SEND_NEW.has(action) ? { kind: "send_new" } : { kind: "deny" };

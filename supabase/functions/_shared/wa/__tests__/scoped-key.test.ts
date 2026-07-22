@@ -56,3 +56,33 @@ Deno.test("categorize escopada: so a propria categoria e so em chat virgem de ca
   assertEquals(d({ action: "categorize", chatCats: ["pessoal"], categorizeSlugs: [CAT] }), "deny");
   assertEquals(d({ action: "categorize", chatCats: [CAT] }), "pass"); // ja dentro: idempotente
 });
+
+// ── TRAVA DE INSTANCIA (Eric 22/07): key so toca UM numero ──
+const PES = "inst-pessoal", PRO = "inst-profissional";
+
+Deno.test("sem scopedInstance = comportamento antigo (so categoria, instancia ignorada)", () => {
+  assertEquals(d({ action: "read", chatCats: [CAT], chatInstance: PRO }), "pass");
+  assertEquals(d({ action: "send", chatCats: [CAT], chatInstance: PRO }), "pass");
+});
+
+Deno.test("com scopedInstance: chat da instancia permitida = pass", () => {
+  assertEquals(d({ action: "read", chatCats: [CAT], scopedInstance: PES, chatInstance: PES }), "pass");
+  assertEquals(d({ action: "send", chatCats: [CAT], scopedInstance: PES, chatInstance: PES }), "pass");
+});
+
+Deno.test("com scopedInstance: chat vip mas em OUTRA instancia = deny_instance (a trava do Eric)", () => {
+  assertEquals(d({ action: "read", chatCats: [CAT], scopedInstance: PES, chatInstance: PRO }), "deny_instance");
+  assertEquals(d({ action: "send", chatCats: [CAT], scopedInstance: PES, chatInstance: PRO }), "deny_instance");
+  assertEquals(d({ action: "react", chatCats: [CAT], scopedInstance: PES, chatInstance: PRO }), "deny_instance");
+});
+
+Deno.test("deny_instance vence a categoria: nem categoria certa salva instancia errada", () => {
+  // chat na categoria certa (passaria) mas instancia errada -> barrado pela instancia
+  assertEquals(d({ action: "categorize", chatCats: [], categorizeSlugs: [CAT], scopedInstance: PES, chatInstance: PRO }), "deny_instance");
+});
+
+Deno.test("destino sem chat: instancia forcada pelo glue, decisao segue send_new", () => {
+  // chatInstance null (chat nao existe) -> sem gate de instancia na funcao pura; glue forca params.instance
+  assertEquals(d({ action: "send", chatCats: null, scopedInstance: PES }), "send_new");
+  assertEquals(d({ action: "read", chatCats: null, scopedInstance: PES }), "deny");
+});

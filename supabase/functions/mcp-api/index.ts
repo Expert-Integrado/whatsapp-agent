@@ -27,6 +27,10 @@ const MCP_API_KEY = Deno.env.get("MCP_API_KEY") ?? "";
 // Sem os DOIS secrets definidos, o caminho escopado nao existe.
 const MCP_API_KEY_SCOPED = Deno.env.get("MCP_API_KEY_SCOPED") ?? "";
 const MCP_SCOPED_CATEGORY = Deno.env.get("MCP_SCOPED_CATEGORY") ?? "";
+// Trava de INSTANCIA da key escopada (Eric 22/07): alias/instance_id do UNICO numero que a key
+// escopada pode tocar (ex "pessoal"). Vazio = sem trava de instancia (comportamento antigo, so
+// categoria). Resolvido a instance_id no authScope.
+const MCP_SCOPED_INSTANCE = Deno.env.get("MCP_SCOPED_INSTANCE") ?? "";
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
 // PAT do Expert Brain (feedback de calibracao, 0058): quando o agente patina no
 // voice gate (bloqueios repetidos no mesmo chat), abre task de CORRECAO do voice
@@ -2120,7 +2124,7 @@ const TOOL_SCHEMAS = [
 ];
 
 // ─── Glue da credencial escopada (decisao pura em _shared/wa/scoped-key.ts) ───
-type KeyScope = { category: string };
+type KeyScope = { category: string; instance?: string | null };
 
 async function chatCategoriaSlugs(chatId: string, instanceId?: string | null): Promise<string[]> {
   let q = supabase.from("v_chats_with_categories").select("category_slugs").eq("chat_id", chatId);
@@ -2148,14 +2152,21 @@ async function categorizaNoEscopo(chatId: string, instanceId: string | null | un
 }
 
 const foraDoEscopo = () => json({ ok: false, error: "contato fora do escopo desta credencial" }, 403);
+const foraDaInstancia = () => json({ ok: false, error: "contato fora do numero permitido pra esta credencial" }, 403);
 
 // Enforcement da key escopada: roda ANTES do dispatch normal. O filtro tem que ser o
 // servidor nao devolver — params do cliente nunca relaxam o escopo, so estreitam.
 async function dispatchScoped(action: string, params: any = {}, scope: KeyScope): Promise<Response> {
+  // TRAVA DE INSTANCIA (Eric 22/07): a key so pode tocar UM numero. Forcar params.instance ANTES
+  // de tudo estreita inbox/search (filtro instance_id), resolveChat (so resolve nessa instancia) e
+  // send (allow_new exige instance -> nasce no numero certo). O cliente nunca relaxa: sobrescreve.
+  if (scope.instance) params = { ...params, instance: scope.instance };
+
   const previa = decideScopedAction({ action, category: scope.category });
   if (previa.kind === "pass") return dispatchAction(action, params);
   if (previa.kind === "blocked") return json({ ok: false, error: `tool "${action}" indisponivel pra credencial escopada` }, 403);
   if (previa.kind === "force_filter") {
+    // instance ja forcada acima (params) — inbox/search filtram por instance_id no SQL
     return dispatchAction(action, { ...params, category_slugs: [scope.category], exclude_categories: undefined });
   }
 
@@ -2164,6 +2175,7 @@ async function dispatchScoped(action: string, params: any = {}, scope: KeyScope)
   if (!ref && action === "check_delivery" && params.message_id) {
     const { data: m } = await supabase.from("messages").select("chat_id,instance_id").eq("id", params.message_id).maybeSingle();
     if (!m) return dispatchAction(action, params); // erro natural do case
+    if (scope.instance && m.instance_id && m.instance_id !== scope.instance) return foraDaInstancia();
     const cats = await chatCategoriaSlugs(m.chat_id, m.instance_id);
     return cats.includes(scope.category) ? dispatchAction(action, params) : foraDoEscopo();
   }
@@ -2171,9 +2183,9 @@ async function dispatchScoped(action: string, params: any = {}, scope: KeyScope)
 
   const resolved = await resolveChat(String(ref), params.instance);
   if (resolved.error) {
-    const dec = decideScopedAction({ action, category: scope.category, chatCats: null });
+    const dec = decideScopedAction({ action, category: scope.category, chatCats: null, scopedInstance: scope.instance });
     if (dec.kind !== "send_new") return foraDoEscopo();
-    // destino sem chat: o case faz o allow_new; depois o chat recem-criado nasce na categoria
+    // destino sem chat: o case faz o allow_new (com a instance ja forcada); o chat nasce na categoria
     const resp = await dispatchAction(action, params);
     try {
       const denovo = await resolveChat(String(ref), params.instance);
@@ -2185,9 +2197,10 @@ async function dispatchScoped(action: string, params: any = {}, scope: KeyScope)
     return resp;
   }
   if (resolved.candidates) {
-    // nunca vazar candidato fora do escopo; 1 sobrando = despacha deterministicamente
+    // nunca vazar candidato fora do escopo/instancia; 1 sobrando = despacha deterministicamente
     const dentro: any[] = [];
     for (const c of resolved.candidates) {
+      if (scope.instance && c.instance && c.instance !== scope.instance) continue;
       const cats = await chatCategoriaSlugs(c.chat_id, c.instance);
       if (cats.includes(scope.category)) dentro.push(c);
     }
@@ -2204,7 +2217,9 @@ async function dispatchScoped(action: string, params: any = {}, scope: KeyScope)
     action, category: scope.category, chatCats: cats,
     categorizeSlugs: params.category_slugs,
     semHistorico: cats.length === 0 ? await chatSemHistorico(resolved.chat_id, resolved.instance_id) : false,
+    scopedInstance: scope.instance, chatInstance: resolved.instance_id,
   });
+  if (dec.kind === "deny_instance") return foraDaInstancia();
   if (dec.kind === "pass") return dispatchAction(action, params);
   if (dec.kind === "adopt") {
     await categorizaNoEscopo(resolved.chat_id, resolved.instance_id, scope.category);
@@ -2273,7 +2288,9 @@ async function authScope(req: Request): Promise<{ ok: boolean; scope: KeyScope |
   if (MCP_API_KEY && (timingSafeEqual(xkey, MCP_API_KEY) || timingSafeEqual(bearer, MCP_API_KEY))) return { ok: true, scope: null };
   if (MCP_API_KEY_SCOPED && MCP_SCOPED_CATEGORY &&
     (timingSafeEqual(xkey, MCP_API_KEY_SCOPED) || timingSafeEqual(bearer, MCP_API_KEY_SCOPED))) {
-    return { ok: true, scope: { category: MCP_SCOPED_CATEGORY } };
+    // resolve o numero permitido (alias->instance_id) 1x por request; vazio = sem trava de instancia
+    const instance = MCP_SCOPED_INSTANCE ? await resolveInstanceKey(MCP_SCOPED_INSTANCE) : null;
+    return { ok: true, scope: { category: MCP_SCOPED_CATEGORY, instance } };
   }
   if (bearer) {
     const p = await jwtVerify(bearer, MCP_API_KEY);
